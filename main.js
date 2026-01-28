@@ -27,6 +27,9 @@ const { recordFailure, resetFailure } = require('./Task/consecutiveFailureTracke
 // NEW: centralized acceptance engine (best practice)
 const { evaluateTaskAcceptance, REASONS } = require('./Task/taskAcceptance');
 
+// Metrics collection for observability
+const { metricsCollector } = require('./Metrics/metricsCollector');
+
 const { cloneProfiles } = require('./tools/cloneProfile');
 const { RETRIES, EXIT_CODES, TIMEOUTS } = require('./Config/constants');
 
@@ -115,6 +118,12 @@ function mapRejectReasonToSheetStatus(code) {
       successful++;
       resetFailure();
 
+      // Record completion metric with processing time
+      const processingTimeMs = res?.context?.processingStartMs
+        ? Date.now() - res.context.processingStartMs
+        : 0;
+      metricsCollector.recordTaskCompleted(processingTimeMs);
+
       const allocationPlan = res?.context?.allocationPlan || [];
       const planStr = allocationPlan.map(d => `${d.date} (${d.amount})`).join(', ');
       const words = res.amountWords || 0;
@@ -141,6 +150,7 @@ function mapRejectReasonToSheetStatus(code) {
     },
 
     onError: async (err) => {
+      metricsCollector.recordTaskFailed();
       const reasonText = (err.message || '').toLowerCase();
       await recordFailure();
 
@@ -174,6 +184,9 @@ function mapRejectReasonToSheetStatus(code) {
 
   /* ========================= Event Listener ========================= */
   startListeningEmails(async ({ orderId, workflowName, url, amountWords, plannedEndDate, status, receivedDate }) => {
+    // Record every incoming task for metrics
+    metricsCollector.recordTaskReceived();
+
     // 0) System-side status handling
     if ((status || '').toLowerCase() === 'on hold') {
       logInfo(`⏸ On hold detected | Order ID: ${orderId} | Workflow: ${workflowName}`);
@@ -185,11 +198,14 @@ function mapRejectReasonToSheetStatus(code) {
     const evalRes = evaluateTaskAcceptance({ orderId, amountWords, plannedEndDate });
 
     if (!evalRes.accepted) {
+      metricsCollector.recordTaskRejected(evalRes.code);
       const sheetStatus = mapRejectReasonToSheetStatus(evalRes.code); // always 'Declined'
       logFail(`⛔ Rejected | Order ID: ${orderId} | ${evalRes.code} | ${evalRes.message} | raw=${evalRes.rawDeadline} effective=${evalRes.effectiveDeadline || '-'}`, true);
       await markStatusWithRetry(orderId, sheetStatus, 'DTP', receivedDate);
       return;
     }
+
+    metricsCollector.recordTaskAccepted();
 
     const { allocationPlan, effectiveDeadline, code } = evalRes;
     const dateList = allocationPlan.map(d => d.date).join(', ');
@@ -202,7 +218,7 @@ function mapRejectReasonToSheetStatus(code) {
 
     // 2) Enqueue worker task
     queue.addTask(async () => {
-      const context = { allocationPlan, acceptanceCode: code };
+      const context = { allocationPlan, acceptanceCode: code, processingStartMs: Date.now() };
 
       incrementStatus('pending');
       pushStatusUpdate();

@@ -3,7 +3,14 @@ require('dotenv').config();
 const { ImapFlow } = require('imapflow');
 const { logInfo, logSuccess, logFail, logProgress } = require('../Logs/logger');
 const { notifyGoogleChat } = require('../Logs/notifier');
-const { fetchNewEmails, initLastSeenUid } = require('./fetcher');
+const { IMAPHealthMonitor } = require('./IMAPHealthMonitor');
+const { fetchNewEmails, initLastSeenUid, setHealthMonitor } = require('./fetcher');
+
+// Singleton IMAP health monitor
+const healthMonitor = new IMAPHealthMonitor(notifyGoogleChat);
+
+// Inject health monitor into fetcher (avoids circular dependency)
+setHealthMonitor(healthMonitor);
 
 // อ่านหลายกล่องจาก .env: MAILBOXES=Symfonie/Order,Symfonie/On hold
 const MAILBOXES = (process.env.MAILBOXES || process.env.MAILBOX || 'Symfonie/Order')
@@ -142,6 +149,10 @@ async function connectToImapForMailbox(mailboxName, callback) {
 
 function attemptReconnect(mailboxName, callback, baseDelay = CONFIG.INITIAL_RETRY_DELAY) {
   if (getReconnecting(mailboxName)) return;
+
+  // Track reconnect event in health monitor
+  healthMonitor.recordReconnect(mailboxName);
+
   let tries = getRetry(mailboxName);
 
   if (tries >= CONFIG.MAX_RETRIES) {
@@ -221,6 +232,14 @@ function getConnectionStats() {
   };
 }
 
+function getIMAPHealthStatus() {
+  return healthMonitor.getHealthSnapshot();
+}
+
+function getIMAPHealthMonitor() {
+  return healthMonitor;
+}
+
 module.exports = {
   startListeningEmails: connectToImap,   // ใช้ตัวนี้จาก main.js
   pauseImap,
@@ -228,4 +247,6 @@ module.exports = {
   isImapPaused,
   checkConnection,
   getConnectionStats,
+  getIMAPHealthStatus,
+  getIMAPHealthMonitor,
 };

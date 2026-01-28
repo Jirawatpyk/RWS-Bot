@@ -29,7 +29,9 @@ async function writeCapacityLog(entry) {
 }
 const { getAllStatus } = require("./statusManager/taskStatusStore");
 const { logSuccess, logInfo } = require("../Logs/logger");
-const { pauseImap, resumeImap, isImapPaused } = require("../IMAP/imapClient");
+const { pauseImap, resumeImap, isImapPaused, getConnectionStats, getIMAPHealthStatus } = require("../IMAP/imapClient");
+const { getBrowserPoolStatus } = require('../Task/runTaskInNewBrowser');
+const { metricsCollector } = require('../Metrics/metricsCollector');
 const { TIMEOUTS } = require('../Config/constants');
 const { withFileLock, saveJSONAtomic } = require('../Utils/fileUtils');
 const app = express();
@@ -55,6 +57,17 @@ const {
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
+
+// GET IMAP health status (connection stats + health monitor snapshot)
+app.get('/api/health/imap', (req, res) => {
+  try {
+    const stats = getConnectionStats();
+    const health = getIMAPHealthStatus();
+    res.json({ connection: stats, health });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // GET override.json
 app.get('/api/override', (req, res) => {
@@ -143,6 +156,25 @@ app.get('/api/tasks', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// GET /api/metrics - system observability metrics snapshot
+app.get('/api/metrics', (req, res) => {
+  try {
+    const poolStatus = getBrowserPoolStatus ? getBrowserPoolStatus() : {};
+    metricsCollector.updateBrowserPoolStatus(poolStatus);
+  } catch {
+    // Browser pool may not be initialized yet
+  }
+
+  try {
+    const imapStats = getConnectionStats ? getConnectionStats() : {};
+    metricsCollector.updateIMAPStatus(imapStats);
+  } catch {
+    // IMAP may not be connected yet
+  }
+
+  res.json(metricsCollector.getSnapshot());
 });
 
 // POST /api/tasks/refresh - ดึงจาก Sheet + เคลียร์ completed/on-hold + sync capacity (รวมทุกอย่างเป็น API เดียว)

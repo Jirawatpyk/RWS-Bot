@@ -28,7 +28,7 @@ class BrowserPool {
     this._cleanupInterval = null;
 
     this.baseLaunchOptions = {
-      headless: true,
+      headless: "new",
       executablePath: puppeteer.executablePath(),
       defaultViewport: { width: 1200, height: 800 },
       args: [

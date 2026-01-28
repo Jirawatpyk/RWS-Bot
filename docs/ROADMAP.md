@@ -109,132 +109,52 @@ app.post('/api/override', authenticateAPI, async (req, res) => { ... });
 
 ### 1.2 Observability & Monitoring
 
-#### [ ] 6. เพิ่ม Health Check + Alerting สำหรับ IMAP
+#### [x] 6. เพิ่ม Health Check + Alerting สำหรับ IMAP -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** IMAP connection degraded แต่ไม่มีการแจ้งเตือน
-**ไฟล์:** `IMAP/imapClient.js`, `Logs/notifier.js`
+**ไฟล์:** `IMAP/IMAPHealthMonitor.js` (new), `IMAP/imapClient.js`, `IMAP/fetcher.js`, `Dashboard/server.js`, `Config/constants.js`
 
-**แนวทางแก้:**
-- เพิ่ม heartbeat check (NOOP command ทุก 2 นาที)
-- Track connection state transitions
-- Alert ผ่าน Google Chat เมื่อ reconnect เกิน 3 ครั้ง/10 นาที
-
-```javascript
-class IMAPHealthMonitor {
-  constructor(imapClient, notifier) {
-    this.client = imapClient;
-    this.notifier = notifier;
-    this.reconnectCount = 0;
-    this.lastReconnect = null;
-  }
-
-  startHeartbeat() {
-    this.heartbeatInterval = setInterval(async () => {
-      try {
-        await this.client.noop(); // Keep-alive
-      } catch (err) {
-        logger.error('IMAP heartbeat failed', err);
-        await this.notifier.alert('IMAP connection unhealthy');
-      }
-    }, 2 * 60 * 1000);
-  }
-
-  onReconnect() {
-    const now = Date.now();
-    if (this.lastReconnect && now - this.lastReconnect < 10 * 60 * 1000) {
-      this.reconnectCount++;
-      if (this.reconnectCount >= 3) {
-        this.notifier.alert('IMAP unstable: 3+ reconnects in 10 min');
-      }
-    } else {
-      this.reconnectCount = 1;
-    }
-    this.lastReconnect = now;
-  }
-}
-```
+**ผลลัพธ์:**
+- สร้าง `IMAPHealthMonitor` class: reconnect tracking (sliding window), health check recording, Google Chat alerting
+- Alert flooding prevention: cooldown per mailbox per window (reconnect + failure alerts)
+- Memory management: `_maxHistorySize=500` cap + periodic prune timer (`HISTORY_PRUNE_INTERVAL=30min`) + `unref()` for graceful exit
+- Health check failure alerting: alert at threshold (`MAX_CONSECUTIVE_FAILURES=5`) + every N multiples, reset on success
+- Integration: singleton in `imapClient.js`, `setHealthMonitor()` injection ใน `fetcher.js` (avoid circular dependency)
+- `recordReconnect()` called from `attemptReconnect()`, `recordHealthCheck()` called from `performHealthCheckIfNeeded()`
+- Dashboard API: `/api/health/imap` returns connection stats + health snapshot (per-mailbox status, thresholds, recent reconnects)
+- Constants: `IMAP_HEALTH` section ใน `Config/constants.js` (RECONNECT_ALERT_THRESHOLD=3, RECONNECT_ALERT_WINDOW=10min, MAX_CONSECUTIVE_FAILURES=5, HISTORY_PRUNE_INTERVAL=30min)
+- `destroy()` method for graceful shutdown and tests
 
 ---
 
-#### [ ] 7. เพิ่ม Metrics Collection + Dashboard
+#### [x] 7. เพิ่ม Metrics Collection + Dashboard -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** ไม่มี observability — debug ยาก ไม่รู้ bottleneck
-**ไฟล์:** `Metrics/metricsCollector.js` (new), `Dashboard/server.js`
+**ไฟล์:** `Metrics/metricsCollector.js` (new), `Dashboard/server.js`, `main.js`
 
-**แนวทางแก้:**
-- Track metrics: task queue length, browser pool utilization, accept/reject ratio
-- Expose `/api/metrics` endpoint
-- แสดงกราฟใน dashboard (Chart.js)
-
-```javascript
-// Metrics/metricsCollector.js
-class MetricsCollector {
-  constructor() {
-    this.metrics = {
-      tasksAccepted: 0,
-      tasksRejected: 0,
-      tasksQueued: 0,
-      browserPoolActive: 0,
-      avgProcessingTime: 0,
-      errors: { byType: {} }
-    };
-  }
-
-  recordTaskAccepted() { this.metrics.tasksAccepted++; }
-  recordTaskRejected(reason) {
-    this.metrics.tasksRejected++;
-    this.metrics.errors.byType[reason] = (this.metrics.errors.byType[reason] || 0) + 1;
-  }
-
-  getSnapshot() { return { ...this.metrics, timestamp: Date.now() }; }
-}
-
-// Dashboard endpoint
-app.get('/api/metrics', (req, res) => {
-  res.json(metricsCollector.getSnapshot());
-});
-```
+**ผลลัพธ์:**
+- สร้าง `MetricsCollector` singleton class: task counters (received/accepted/rejected/completed/failed), rejection reasons tracking, processing times (bounded array max 100)
+- Computed metrics: `getAcceptanceRate()`, `getSuccessRate()`, `getAverageProcessingTime()` พร้อม division-by-zero guard
+- Subsystem status: `updateBrowserPoolStatus()` + `updateIMAPStatus()` with safe defaults
+- `getSnapshot()` returns deep-copied serializable object (timestamp, uptime, counters, rates, performance, rejectionReasons, browserPool, imap)
+- `reset()` method for testing - resets all state consistently
+- Dashboard API: `/api/metrics` endpoint refreshes browser pool + IMAP status before returning snapshot, try-catch สำหรับ subsystems ที่ยังไม่พร้อม
+- Integration กับ `main.js`: instrument ทุก event path (received, accepted, rejected, completed, failed) + processing time tracking via `processingStartMs`
 
 ---
 
-#### [ ] 8. เขียน Integration Tests สำหรับ Exec/execAccept.js
+#### [x] 8. เขียน Integration Tests สำหรับ Exec/execAccept.js -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** Coverage 24%, core automation 450 lines ไม่มี tests
 **ไฟล์:** `__tests__/integration/execAccept.test.js` (new)
 
-**แนวทางแก้:**
-- ใช้ mock Puppeteer browser
-- Test แต่ละ step (STEP_1 ถึง STEP_6)
-- Test error scenarios (element not found, timeout)
-
-```javascript
-// __tests__/integration/execAccept.test.js
-const { executeAcceptWorkflow } = require('../../Exec/execAccept');
-
-describe('execAccept Integration', () => {
-  let mockBrowser, mockPage;
-
-  beforeEach(() => {
-    mockPage = {
-      goto: jest.fn(),
-      waitForSelector: jest.fn(),
-      click: jest.fn(),
-      close: jest.fn()
-    };
-    mockBrowser = { newPage: jest.fn().mockResolvedValue(mockPage) };
-  });
-
-  test('STEP 1: should click Change Status button', async () => {
-    await executeAcceptWorkflow(mockBrowser, { url: 'https://example.com' });
-    expect(mockPage.waitForSelector).toHaveBeenCalledWith('#taskActionConfirm');
-    expect(mockPage.click).toHaveBeenCalledWith('#taskActionConfirm');
-  });
-
-  test('should handle dynamic Select2 dropdown IDs', async () => {
-    // Test for STEP_5 dropdown issue
-  });
-});
-```
+**ผลลัพธ์:**
+- 30 integration tests ครอบคลุม 14 categories: Happy Path, Navigation/Login (SSO redirect, LOGIN_EXPIRED, 404), Task Status Validation, Step 1-6 failures, Error Metadata (BrowserAutomationError), Resource Cleanup (fallback page close, original page preserved), Edge Cases (null page, undefined URL), Timeout Handling (15s/45s), Retry Behavior (retries=2, delay=1000)
+- Coverage สำหรับ `Exec/execAccept.js`: **83%** (up from 24%)
+- Mock strategy: module-scope mocks ที่ re-set ใน `beforeEach()` รองรับ `resetMocks: true`
+- Intelligent page mock: `createFullSuccessPage()` handles chevron className, modal title, dropdown ID, login form contexts
+- ตรวจ resource cleanup: fallback page ถูก close, original page ไม่ถูก close (managed by browserPool)
+- ตรวจ BrowserAutomationError: instanceof, step identifier, details.selector
 
 ---
 
@@ -811,8 +731,8 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 - [x] Zero critical race conditions (capacity.json, concurrent writes) -- Task 1
 - [ ] Dashboard authentication implemented -- Task 2
 - [x] Browser memory leaks fixed -- Task 3
-- [ ] Test coverage >50% for critical paths (execAccept, taskAcceptance) -- Task 8
-- [ ] Health monitoring + alerting operational -- Tasks 6, 7
+- [x] Test coverage >50% for critical paths (execAccept 83%, taskAcceptance 100%) -- Task 8
+- [x] Health monitoring + alerting operational -- Tasks 6, 7
 
 ### Phase 2 Readiness Criteria
 - [ ] State management centralized
@@ -841,14 +761,15 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 
 | Phase | Started | Completed | Progress |
 |-------|---------|-----------|----------|
-| Phase 1: Quick Wins | 2026-01-28 | - | 8/12 (Section 1.1 tasks 1,3,4,5 + Section 1.3 done) |
+| Phase 1: Quick Wins | 2026-01-28 | - | 11/12 (Section 1.1 tasks 1,3,4,5 + Section 1.2 tasks 6,7,8 + Section 1.3 done) |
 | Phase 2: Medium Term | - | - | 0/10 |
 | Phase 3: Long Term | - | - | 0/8 |
 
 **Last Updated:** 2026-01-28
 **Section 1.1 Completed (partial):** 2026-01-28 (Tasks 1, 3, 4, 5 -- reviewed and approved by senior-dev)
+**Section 1.2 Completed:** 2026-01-28 (Tasks 6, 7, 8 -- reviewed and approved by senior-dev)
 **Section 1.3 Completed:** 2026-01-28 (Tasks 9-12, reviewed by code-reviewer + senior-dev)
-**Remaining Section 1.1:** Task 2 (Dashboard Auth), remaining Section 1.2: Tasks 6, 7, 8
+**Remaining Phase 1:** Task 2 (Dashboard Auth)
 **Next Review:** 2026-02-28
 
 ---

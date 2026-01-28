@@ -78,6 +78,14 @@ module.exports = {
     DUE_WITHIN_MINUTES: 15,                     // taskReporter.js (alert if due within 15 mins)
   },
 
+  /* ========================= IMAP Health Monitor ========================= */
+  IMAP_HEALTH: {
+    RECONNECT_ALERT_THRESHOLD: 3,           // alert if reconnects >= 3 within window
+    RECONNECT_ALERT_WINDOW: 10 * 60 * 1000, // 10 minutes sliding window
+    MAX_CONSECUTIVE_FAILURES: 5,            // alert after 5 consecutive health check failures
+    HISTORY_PRUNE_INTERVAL: 30 * 60 * 1000, // prune reconnect history older than 30 minutes
+  },
+
   /* ========================= Process Exit Codes ========================= */
   EXIT_CODES: {
     LOGIN_EXPIRED: 12,                          // main.js (triggers PM2 restart)

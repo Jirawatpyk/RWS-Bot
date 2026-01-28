@@ -29,7 +29,24 @@ jest.mock('../../Logs/notifier', () => ({
 
 jest.mock('../../IMAP/fetcher', () => ({
   fetchNewEmails: (...args) => mockFetchNewEmails(...args),
-  initLastSeenUid: (...args) => mockInitLastSeenUid(...args)
+  initLastSeenUid: (...args) => mockInitLastSeenUid(...args),
+  setHealthMonitor: jest.fn()
+}));
+
+// Mock IMAPHealthMonitor (required by imapClient.js at module level)
+jest.mock('../../IMAP/IMAPHealthMonitor', () => ({
+  IMAPHealthMonitor: jest.fn().mockImplementation(() => ({
+    recordReconnect: jest.fn(),
+    recordHealthCheck: jest.fn(),
+    getHealthSnapshot: jest.fn().mockReturnValue({
+      timestamp: Date.now(),
+      thresholds: {},
+      totalReconnectsTracked: 0,
+      mailboxes: {}
+    }),
+    destroy: jest.fn(),
+    _pruneTimer: null
+  }))
 }));
 
 // Mock ImapFlow
@@ -153,6 +170,30 @@ describe('IMAP/imapClient.js', () => {
       expect(imapClient.isImapPaused).toBeDefined();
       expect(imapClient.checkConnection).toBeDefined();
       expect(imapClient.getConnectionStats).toBeDefined();
+    });
+
+    it('should export health monitor functions', () => {
+      expect(imapClient.getIMAPHealthStatus).toBeDefined();
+      expect(imapClient.getIMAPHealthMonitor).toBeDefined();
+      expect(typeof imapClient.getIMAPHealthStatus).toBe('function');
+      expect(typeof imapClient.getIMAPHealthMonitor).toBe('function');
+    });
+  });
+
+  describe('getIMAPHealthStatus()', () => {
+    it('should return a health snapshot object', () => {
+      const snapshot = imapClient.getIMAPHealthStatus();
+      expect(snapshot).toBeDefined();
+      expect(typeof snapshot).toBe('object');
+    });
+  });
+
+  describe('getIMAPHealthMonitor()', () => {
+    it('should return the health monitor instance', () => {
+      const monitor = imapClient.getIMAPHealthMonitor();
+      expect(monitor).toBeDefined();
+      expect(monitor.recordReconnect).toBeDefined();
+      expect(monitor.getHealthSnapshot).toBeDefined();
     });
   });
 });

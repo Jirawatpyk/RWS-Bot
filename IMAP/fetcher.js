@@ -13,6 +13,9 @@ const { logInfo, logSuccess, logFail } = require('../Logs/logger');
 const { retry } = require('./retryHandler');
 const { TIMEOUTS, CAPACITY, RETRIES } = require('../Config/constants');
 
+// Health monitor instance - set externally via setHealthMonitor()
+let healthMonitor = null;
+
 const seenUidsMap = new Map();
 const lastSeenUidMap = new Map();
 const isFetchingMap = new Map();
@@ -108,6 +111,14 @@ class EmailContentParser {
   }
 }
 
+/**
+ * Inject health monitor instance (called from imapClient.js to avoid circular dependency)
+ * @param {import('./IMAPHealthMonitor').IMAPHealthMonitor} monitor
+ */
+function setHealthMonitor(monitor) {
+  healthMonitor = monitor;
+}
+
 // ===== Smart Health Check per mailbox =====
 async function performHealthCheckIfNeeded(client, mailboxName) {
   const now = Date.now();
@@ -143,6 +154,8 @@ async function performHealthCheckIfNeeded(client, mailboxName) {
     logInfo(
       `💚 [${mailboxName}] Connection healthy (${dur}ms) | Interval: ${HEALTH_CHECK_INTERVAL/1000}s | Timeout: ${HEALTH_CHECK_TIMEOUT/1000}s`
     );
+    // Report healthy status to monitor
+    if (healthMonitor) healthMonitor.recordHealthCheck(mailboxName, true);
     return true;
   } catch (err) {
     const dur = Date.now() - healthCheckStart;
@@ -155,6 +168,9 @@ async function performHealthCheckIfNeeded(client, mailboxName) {
       timeout: HEALTH_CHECK_TIMEOUT,
       interval: HEALTH_CHECK_INTERVAL,
     });
+
+    // Report failure to monitor
+    if (healthMonitor) healthMonitor.recordHealthCheck(mailboxName, false, err);
 
     lastHealthCheckMap.set(mailboxName, now); // กัน spam checks
     logInfo(`🔧 [${mailboxName}] Continuing with degraded mode - next check in ${HEALTH_CHECK_INTERVAL/1000}s`);
@@ -492,5 +508,6 @@ module.exports = {
   initLastSeenUid,
   cleanupFetcher,
   forceHealthCheck, // Export for debugging
+  setHealthMonitor, // Inject health monitor instance
   EmailContentParser
 };

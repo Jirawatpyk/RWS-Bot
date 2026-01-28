@@ -262,15 +262,25 @@ class App {
     console.log('[App] Refreshing data...');
 
     try {
-      // Request refresh via WebSocket
+      // Request status refresh via WebSocket
       ws.requestRefresh();
 
-      // Also fetch via API as fallback
-      const [capacityData, tasksData, overrideData] = await Promise.all([
+      // Call POST /api/tasks/refresh to sync with Google Sheets
+      // This removes completed/on-hold tasks and recalculates capacity
+      const [refreshResult, capacityData, overrideData] = await Promise.all([
+        api.refreshTasks().catch((err) => {
+          console.warn('[App] refreshTasks failed, falling back to getAcceptedTasks:', err.message);
+          return null;
+        }),
         api.getCapacity().catch(() => null),
-        api.getAcceptedTasks().catch(() => null),
         api.getOverride().catch(() => null)
       ]);
+
+      // Use refreshTasks result if available, otherwise fallback to read-only
+      let tasksData = refreshResult?.tasks;
+      if (!tasksData) {
+        tasksData = await api.getAcceptedTasks().catch(() => null);
+      }
 
       if (capacityData) {
         store.set('capacity', capacityData);
@@ -282,6 +292,10 @@ class App {
 
       if (overrideData) {
         store.set('override', overrideData);
+      }
+
+      if (refreshResult?.completedCount > 0 || refreshResult?.onHoldCount > 0) {
+        console.log(`[App] Removed ${refreshResult.completedCount} completed, ${refreshResult.onHoldCount} on-hold tasks`);
       }
 
       store.set('lastSync', new Date().toISOString());

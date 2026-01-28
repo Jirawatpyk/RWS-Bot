@@ -175,22 +175,35 @@ class ApiService {
   }
 
   /**
-   * Get accepted tasks list
+   * Get accepted tasks list (read-only, no Sheet query)
    * @returns {Promise<Array>} - List of accepted tasks
    */
   async getAcceptedTasks() {
     const response = await this.get(CONFIG.API.ACCEPTED_TASKS);
+    return this._transformTasksResponse(response);
+  }
+
+  /**
+   * Refresh tasks from Google Sheets — removes completed/on-hold tasks and syncs capacity
+   * @returns {Promise<object>} - { success, tasks, summary, completedCount, onHoldCount, capacity, ... }
+   */
+  async refreshTasks() {
+    const response = await this.post('/api/tasks/refresh');
+    return {
+      ...response,
+      tasks: this._transformTasksResponse(response)
+    };
+  }
+
+  _transformTasksResponse(response) {
     let tasks = [];
 
-    // Server returns { tasks, summary, lastUpdated } - extract tasks array
     if (response && Array.isArray(response.tasks)) {
       tasks = response.tasks;
     } else if (Array.isArray(response)) {
-      // Fallback if response is already an array (old format)
       tasks = response;
     }
 
-    // Transform server fields to frontend expected fields
     return tasks.map(task => ({
       ...task,
       workflow: task.workflowName || task.workflow || task.orderId,
