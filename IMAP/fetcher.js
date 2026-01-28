@@ -1,6 +1,12 @@
 const { simpleParser } = require('mailparser');
 const cheerio = require('cheerio');
 const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+const customParseFormat = require('dayjs/plugin/customParseFormat');
+dayjs.extend(utc);
+dayjs.extend(timezone);
+dayjs.extend(customParseFormat);
 const { loadLastSeenUidFromFile, saveLastSeenUid } = require('./uidStore');
 const { loadSeenUids, saveSeenUids } = require('./seenUidsStore');
 const { logInfo, logSuccess, logFail } = require('../Logs/logger');
@@ -247,7 +253,12 @@ async function fetchNewEmails(client, mailboxName, callback) {
             const parsed = await simpleParser(message.source);
             const content = parsed.html || parsed.text || '';
             const rawText = `${parsed.subject || ''} ${parsed.text || ''} ${parsed.html || ''}`;
-            
+
+            // Extract receivedDate from email header and convert to Sheet format (UTC+7)
+            const receivedDate = parsed.date
+              ? dayjs(parsed.date).tz('Asia/Bangkok').format('YYYY-MM-DD h:mm A')
+              : null;
+
             const emailData = parser.parseEmail(content, rawText);
             
             logInfo(`📩 UID ${uid} | ${emailData.status} :: [${emailData.orderId}] Words: ${emailData.metrics.amountWords} | Deadline: ${emailData.metrics.plannedEndDate}`);
@@ -268,6 +279,7 @@ async function fetchNewEmails(client, mailboxName, callback) {
                   amountWords: emailData.metrics.amountWords,
                   plannedEndDate: emailData.metrics.plannedEndDate,
                   status: emailData.status,
+                  receivedDate,
                 };
                 setImmediate(() => {
                   Promise.resolve(callback?.(payload)).catch(err => {
@@ -286,7 +298,8 @@ async function fetchNewEmails(client, mailboxName, callback) {
                   url: link,
                   amountWords: emailData.metrics.amountWords,
                   plannedEndDate: emailData.metrics.plannedEndDate,
-                  status: emailData.status
+                  status: emailData.status,
+                  receivedDate
                 };
                 setImmediate(() => {
                   Promise.resolve(callback?.(payload)).catch(err => {

@@ -12,6 +12,37 @@ const {
 const fs = require('fs');
 const { logSuccess, logFail, logInfo } = require('../Logs/logger');
 
+// Constants
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
+const ALERT_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+
+// Report schedule times
+const REPORT_TIMES = [
+  { hour: 9, minute: 0, label: '09:00 Report' },
+  { hour: 15, minute: 0, label: '15:00 Report' },
+  { hour: 18, minute: 0, label: '18:00 Report' }
+];
+
+// Timer tracking for cleanup
+const activeTimers = {
+  timeouts: [],
+  intervals: []
+};
+
+/**
+ * Run daily report and send to Google Chat
+ */
+async function runDailyReport() {
+  const { activeTasks, completedCount } = await loadAndFilterTasks();
+  const summary = summarizeTasks(activeTasks);
+  summary.completedCount = completedCount;
+  const message = formatReport(summary);
+  await sendToGoogleChat(message);
+}
+
+/**
+ * Schedule a task to run daily at a specific time
+ */
 function scheduleDailyAt(hour, minute, taskFn, label) {
   const now = new Date();
   const target = new Date(now);
@@ -20,12 +51,13 @@ function scheduleDailyAt(hour, minute, taskFn, label) {
   const delay = target - now;
 
   logInfo(`🕘 [INIT] Scheduled daily "${label}" in ${Math.round(delay / 1000)} sec`);
-  setTimeout(() => {
+
+  const timeoutId = setTimeout(() => {
     const wrapped = async () => {
       if (!isBusinessDay(dayjs())) {
         logInfo(`[SKIP] ${label} – Not a business day`);
         return;
-      } 
+      }
       try {
         await taskFn();
       } catch (err) {
@@ -33,49 +65,26 @@ function scheduleDailyAt(hour, minute, taskFn, label) {
       }
     };
     wrapped(); // run first time
-    setInterval(wrapped, 24 * 60 * 60 * 1000);
+    const intervalId = setInterval(wrapped, ONE_DAY_MS);
+    activeTimers.intervals.push(intervalId);
   }, delay);
+
+  activeTimers.timeouts.push(timeoutId);
 }
 
-function startTaskSchedule() {
-  scheduleDailyAt(9, 0, async () => {
-    logSuccess('📅 Running daily task report at 09:00...');
-    const { activeTasks, completedCount } = await loadAndFilterTasks();
-    const summary = summarizeTasks(activeTasks);
-    summary.completedCount = completedCount;
-    const message = formatReport(summary);
-    await sendToGoogleChat(message);
-  }, '09:00 Report');
-
-  scheduleDailyAt(15, 0, async () => {
-    logSuccess('📅 Running daily task report at 15:00...');
-    const { activeTasks, completedCount } = await loadAndFilterTasks();
-    const summary = summarizeTasks(activeTasks);
-    summary.completedCount = completedCount;
-    const message = formatReport(summary);
-    await sendToGoogleChat(message);
-  }, '15:00 Report');
-
-  scheduleDailyAt(18, 0, async () => {
-    logSuccess('📅 Running daily task report at 18:00...');
-    const { activeTasks, completedCount } = await loadAndFilterTasks();
-    const summary = summarizeTasks(activeTasks);
-    summary.completedCount = completedCount;
-    const message = formatReport(summary);
-    await sendToGoogleChat(message);
-  }, '18:00 Report');
-
-// ⏱ Alert checker (15 นาที)
-setInterval(async () => {
+/**
+ * Check for tasks due within 15 minutes and send alerts
+ */
+async function checkAlerts() {
   if (!isBusinessDay(dayjs())) return;
+
   try {
     if (!fs.existsSync(acceptedTasksPath)) return;
 
-    const raw = fs.readFileSync(acceptedTasksPath);
+    const raw = fs.readFileSync(acceptedTasksPath, 'utf-8');
     const allTasks = JSON.parse(raw);
     const statusMap = await readStatusMapFromSheet();
 
-    // กรองเงียบ ๆ (ไม่ log "Skip ...")
     const activeTasks = allTasks.filter(task => {
       const status = (statusMap[task.workflowName] || '').toLowerCase();
       return status !== 'completed';
@@ -93,8 +102,34 @@ setInterval(async () => {
   } catch (err) {
     logFail(`❌ Alert checker failed: ${err.message || err}`, true);
   }
-}, 15 * 60 * 1000);
-
 }
 
-module.exports = { startTaskSchedule };
+/**
+ * Start all scheduled tasks
+ */
+function startTaskSchedule() {
+  // Schedule daily reports
+  REPORT_TIMES.forEach(({ hour, minute, label }) => {
+    scheduleDailyAt(hour, minute, async () => {
+      logSuccess(`📅 Running daily task report at ${label}...`);
+      await runDailyReport();
+    }, label);
+  });
+
+  // Alert checker (every 15 minutes)
+  const alertIntervalId = setInterval(checkAlerts, ALERT_CHECK_INTERVAL_MS);
+  activeTimers.intervals.push(alertIntervalId);
+}
+
+/**
+ * Stop all scheduled tasks (for graceful shutdown)
+ */
+function stopTaskSchedule() {
+  activeTimers.timeouts.forEach(id => clearTimeout(id));
+  activeTimers.intervals.forEach(id => clearInterval(id));
+  activeTimers.timeouts = [];
+  activeTimers.intervals = [];
+  logInfo('[SCHEDULER] All timers cleared');
+}
+
+module.exports = { startTaskSchedule, stopTaskSchedule };

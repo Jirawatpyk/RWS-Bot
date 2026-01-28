@@ -3,10 +3,16 @@ const BrowserPool = require('../BrowserPool/browserPool');
 const execAccept = require('../Exec/execAccept');
 const withTimeout = require('../Utils/taskTimeout');
 
+// Config: ใช้จาก env หรือ default 60 วินาที
+const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS, 10) || 60000;
+
 // singleton browser pool
 let browserPool = null;
 
 function normalizeUrl(url) {
+  if (!url || typeof url !== 'string') {
+    return url;
+  }
   const mode = process.env.MORAVIA_REWRITE_MODE;
   if (mode === 'projects-new') {
     return url.replace('projects.moravia.com', 'projects-new.moravia.com');
@@ -29,47 +35,78 @@ async function closeBrowserPool() {
   }
 }
 
-module.exports = async function runTaskInNewBrowser({ task }) {
+/**
+ * Run task in browser from pool
+ * @param {Object} param0 - Task object
+ * @param {Object} param0.task - Task with url property
+ * @returns {Promise<{success: boolean, reason: string, url: string}>}
+ */
+async function runTaskInNewBrowser({ task }) {
+  // Fix #3: Validate task.url
+  if (!task?.url) {
+    return {
+      success: false,
+      reason: 'Invalid task: missing url',
+      url: null
+    };
+  }
+
   const fixedUrl = normalizeUrl(task.url);
   let browser = null;
+  let page = null;
 
-  const taskFn = async () => {
-    try {
-      if (!browserPool) {
-        throw new Error('BrowserPool not initialized. Call initializeBrowserPool() in main first.');
-      }
+  try {
+    if (!browserPool) {
+      throw new Error('BrowserPool not initialized. Call initializeBrowserPool() in main first.');
+    }
 
-      browser = await browserPool.getBrowser();
+    // Fix #1: ย้าย getBrowser ออกมานอก withTimeout
+    // เพื่อให้ finally cleanup ทำงานได้แม้ timeout
+    browser = await browserPool.getBrowser();
+    page = await browser.newPage();
 
-      const page = await browser.newPage();
-      page.setDefaultTimeout(60000);
-      page.setDefaultNavigationTimeout(60000);
+    // Fix #4: ใช้ TASK_TIMEOUT_MS จาก config
+    page.setDefaultTimeout(TASK_TIMEOUT_MS);
+    page.setDefaultNavigationTimeout(TASK_TIMEOUT_MS);
 
-      try {
-        const result = await execAccept({ page, url: fixedUrl });
-        return {
-          success: result?.success || false,
-          reason: result?.reason || '',
-          url: fixedUrl
-        };
-      } finally {
-        try { await page.close(); } catch {}
-      }
-    } catch (err) {
+    // เฉพาะ execAccept ที่อยู่ใน withTimeout
+    const taskFn = async () => {
+      const result = await execAccept({ page, url: fixedUrl });
       return {
-        success: false,
-        reason: err.message,
+        success: result?.success || false,
+        reason: result?.reason || '',
         url: fixedUrl
       };
-    } finally {
-      if (browser && browserPool) {
-        await browserPool.releaseBrowser(browser);
+    };
+
+    return await withTimeout(taskFn, TASK_TIMEOUT_MS);
+
+  } catch (err) {
+    return {
+      success: false,
+      reason: err.message,
+      url: fixedUrl
+    };
+  } finally {
+    // Fix #1 & #2: Cleanup ทำงานเสมอ แม้ timeout
+    // และ capture reference ก่อนใช้งาน
+    if (page) {
+      try { await page.close(); } catch {}
+    }
+    if (browser) {
+      const pool = browserPool; // Fix #2: capture reference ป้องกัน race condition
+      if (pool) {
+        try {
+          await pool.releaseBrowser(browser);
+        } catch (releaseErr) {
+          // Ignore release errors during shutdown
+        }
       }
     }
-  };
+  }
+}
 
-  return await withTimeout(taskFn, 60000);
-};
+module.exports = runTaskInNewBrowser;
 
 // exports for main.js
 module.exports.initializeBrowserPool = initializeBrowserPool;

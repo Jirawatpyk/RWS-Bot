@@ -14,196 +14,267 @@ class BrowserPool {
       fs.mkdirSync(this.profileRoot, { recursive: true });
     }
 
-    this.browsers = [];
-    this.availableBrowsers = [];
-    this.busyBrowsers = new Set();
+    // Use Map<slotIndex, browser> instead of array to prevent memory leak
+    this.browsers = new Map();
+    this.availableSlots = [];
+    this.busySlots = new Set();
     this.isInitialized = false;
+    this._initPromise = null; // Guard concurrent initialize() calls
+    this._closing = false;    // Guard auto-recreate during closeAll
 
     this.baseLaunchOptions = {
-      headless: "new",
+      headless: true,
       executablePath: puppeteer.executablePath(),
       defaultViewport: { width: 1200, height: 800 },
       args: [
-        '--no-sandbox',
         '--disable-setuid-sandbox',
         '--window-size=1200,800',
         '--disable-dev-shm-usage',
         '--no-first-run',
-        '--no-default-browser-check'
+        '--no-default-browser-check',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding'
       ]
     };
+
+    // Only add --no-sandbox when explicitly requested (e.g. Docker)
+    if (options.noSandbox) {
+      this.baseLaunchOptions.args.unshift('--no-sandbox');
+    }
   }
 
   async initialize() {
     if (this.isInitialized) return;
+    // Prevent concurrent initialize() calls from double-creating browsers
+    if (this._initPromise) return this._initPromise;
 
-    logProgress(`⚙️ Initializing browser pool with ${this.poolSize} browsers...`);
-
+    this._initPromise = this._doInitialize();
     try {
-      const browserPromises = [];
-      for (let i = 0; i < this.poolSize; i++) {
-        browserPromises.push(this.createBrowser(i + 1));
+      await this._initPromise;
+    } finally {
+      this._initPromise = null;
+    }
+  }
+
+  async _doInitialize() {
+    logProgress(`Initializing browser pool with ${this.poolSize} browsers...`);
+
+    const launched = [];
+    try {
+      for (let i = 1; i <= this.poolSize; i++) {
+        const browser = await this.createBrowser(i);
+        launched.push({ slot: i, browser });
       }
 
-      this.browsers = await Promise.all(browserPromises);
-      this.availableBrowsers = [...this.browsers];
+      // All succeeded — register them
+      for (const { slot, browser } of launched) {
+        this.browsers.set(slot, browser);
+        this._makeSlotAvailable(slot);
+      }
+
       this.isInitialized = true;
-
-      logSuccess(`✅ Browser pool initialized successfully (${this.poolSize} browsers)`);
+      logSuccess(`Browser pool initialized successfully (${this.poolSize} browsers)`);
     } catch (error) {
-      logFail(`❌ Failed to initialize browser pool: ${error.message}`);
+      // Partial failure: close any browsers that were launched
+      for (const { browser } of launched) {
+        try {
+          if (browser.isConnected()) await browser.close();
+        } catch (_) { /* ignore close errors during cleanup */ }
+      }
+      logFail(`Failed to initialize browser pool: ${error.message}`);
       throw error;
     }
   }
 
-  async createBrowser(index) {
-    try {
-      if (!Number.isInteger(index)) {
-        throw new Error(`createBrowser(index) expects integer slot index, got: ${index}`);
-      }
-
-      // ✅ โปรไฟล์แยกต่อ browser (profile_1..profile_4)
-      const userDataDir = path.join(this.profileRoot, `profile_${index}`);
-      if (!fs.existsSync(userDataDir)) {
-        fs.mkdirSync(userDataDir, { recursive: true });
-      }
-
-      logInfo(`⛏️ Creating browser slot ${index} with profile: ${userDataDir}`);
-
-      const browser = await puppeteer.launch({
-        ...this.baseLaunchOptions,
-        userDataDir
-      });
-
-      // ✅ ผูก slot ไว้กับ browser เพื่อใช้ตอน replace
-      browser.__slotIndex = index;
-
-      browser.on('disconnected', () => {
-        logInfo(`🔵 Browser slot ${index} disconnected`);
-        this.handleBrowserDisconnected(browser);
-      });
-
-      return browser;
-    } catch (error) {
-      logFail(`❌ Failed to create browser ${index}: ${error.message}`);
-      throw error;
+  async createBrowser(slotIndex) {
+    if (!Number.isInteger(slotIndex) || slotIndex < 1) {
+      throw new Error(`createBrowser expects positive integer slot index, got: ${slotIndex}`);
     }
+
+    const userDataDir = path.join(this.profileRoot, `profile_${slotIndex}`);
+    if (!fs.existsSync(userDataDir)) {
+      fs.mkdirSync(userDataDir, { recursive: true });
+    }
+
+    logInfo(`Creating browser slot ${slotIndex} with profile: ${userDataDir}`);
+
+    const browser = await puppeteer.launch({
+      ...this.baseLaunchOptions,
+      userDataDir
+    });
+
+    // Store slot index as a non-enumerable property to avoid accidental serialization
+    Object.defineProperty(browser, '_slotIndex', {
+      value: slotIndex,
+      writable: false,
+      enumerable: false,
+      configurable: false
+    });
+
+    browser.on('disconnected', () => {
+      logInfo(`Browser slot ${slotIndex} disconnected`);
+      this._handleDisconnected(slotIndex);
+    });
+
+    return browser;
   }
 
+  /**
+   * Acquire a browser from the pool.
+   * Node.js is single-threaded so shift() is atomic within a synchronous block —
+   * no mutex needed as long as we don't yield between length check and shift().
+   */
   async getBrowser(timeout = 30000) {
     if (!this.isInitialized) {
       await this.initialize();
     }
+    return this._acquireSlot(timeout);
+  }
 
+  async _acquireSlot(timeout) {
     const startTime = Date.now();
 
-    // รอจนกว่าจะมี browser ว่าง
-    while (this.availableBrowsers.length === 0) {
+    while (this.availableSlots.length === 0) {
       if (Date.now() - startTime > timeout) {
         throw new Error('Timeout waiting for available browser from pool');
       }
       await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    const browser = this.availableBrowsers.shift();
-    this.busyBrowsers.add(browser);
+    // shift() is synchronous — safe from race conditions in Node.js event loop
+    const slot = this.availableSlots.shift();
+    this.busySlots.add(slot);
 
-    // ตรวจสอบว่า browser ยังเชื่อมต่ออยู่หรือไม่
-    if (!browser.isConnected()) {
-      const slot = browser.__slotIndex;
+    let browser = this.browsers.get(slot);
 
-      logInfo(`🔁 Browser slot ${slot} disconnected while acquiring, recreating...`);
-
-      // เอา browser ตัวเก่าออกจาก busy
-      this.busyBrowsers.delete(browser);
-
-      // สร้างใหม่ด้วย "slot เดิม" เท่านั้น (ห้ามใช้ 'replacement')
-      const newBrowser = await this.createBrowser(slot);
-
-      // เก็บในรายการทั้งหมดด้วย
-      this.browsers.push(newBrowser);
-      this.busyBrowsers.add(newBrowser);
-
-      return newBrowser;
+    // Browser disconnected while idle — recreate it (lazy recreate)
+    if (!browser || !browser.isConnected()) {
+      logInfo(`Browser slot ${slot} disconnected while acquiring, recreating...`);
+      try {
+        browser = await this.createBrowser(slot);
+        this.browsers.set(slot, browser);
+      } catch (err) {
+        // Failed to recreate — delay re-add to prevent tight retry loop
+        this.busySlots.delete(slot);
+        setTimeout(() => this._makeSlotAvailable(slot), 5000);
+        throw new Error(`Failed to recreate browser slot ${slot}: ${err.message}`);
+      }
     }
 
     return browser;
   }
 
   async releaseBrowser(browser) {
-    if (!this.busyBrowsers.has(browser)) {
-      logInfo('Browser not found in busy browsers, ignoring release');
+    if (!browser || typeof browser._slotIndex !== 'number') {
+      logInfo('releaseBrowser called with invalid browser, ignoring');
       return;
     }
 
-    this.busyBrowsers.delete(browser);
+    const slot = browser._slotIndex;
 
-    // ตรวจสอบว่า browser ยังใช้งานได้
+    if (!this.busySlots.has(slot)) {
+      logInfo(`Browser slot ${slot} not in busy set, ignoring release`);
+      return;
+    }
+
+    this.busySlots.delete(slot);
+
     if (browser.isConnected()) {
-      this.availableBrowsers.push(browser);
+      this._makeSlotAvailable(slot);
       return;
     }
 
-    // ถ้า disconnected ให้ replace ด้วย slot เดิม
-    const slot = browser.__slotIndex;
-    logInfo(`🔁 Released browser slot ${slot} is disconnected, recreating...`);
-
+    // Disconnected — recreate before returning to pool
+    logInfo(`Released browser slot ${slot} is disconnected, recreating...`);
     try {
       const newBrowser = await this.createBrowser(slot);
-      this.browsers.push(newBrowser);
-      this.availableBrowsers.push(newBrowser);
+      this.browsers.set(slot, newBrowser);
+      this._makeSlotAvailable(slot);
     } catch (error) {
-      logFail(`🔴 Failed to recreate browser slot ${slot}: ${error.message}`);
+      logFail(`Failed to recreate browser slot ${slot}: ${error.message}`);
+      // Delay re-add to prevent tight retry loop if Chrome can't launch
+      setTimeout(() => this._makeSlotAvailable(slot), 5000);
     }
   }
 
-  handleBrowserDisconnected(browser) {
-    // ลบ browser ที่ disconnect ออกจาก available
-    const availableIndex = this.availableBrowsers.indexOf(browser);
-    if (availableIndex !== -1) {
-      this.availableBrowsers.splice(availableIndex, 1);
+  /**
+   * Handle browser disconnect event.
+   * Uses lazy-recreate strategy: slot stays in availableSlots (or busySlots),
+   * and actual recreation happens in getBrowser/releaseBrowser.
+   * This avoids Chrome profile conflicts from dual createBrowser calls.
+   */
+  _handleDisconnected(slotIndex) {
+    // Skip if pool is shutting down
+    if (this._closing) return;
+
+    // If slot was idle: leave it in availableSlots — _acquireSlot will
+    // detect isConnected() === false and lazy-recreate when acquired.
+    if (this.availableSlots.includes(slotIndex)) {
+      logInfo(`Browser slot ${slotIndex} disconnected while idle, will lazy-recreate on next acquire`);
+      return;
     }
 
-    // ลบออกจาก busy
-    this.busyBrowsers.delete(browser);
-
-    // ลบออกจาก browsers list
-    const browsersIndex = this.browsers.indexOf(browser);
-    if (browsersIndex !== -1) {
-      this.browsers.splice(browsersIndex, 1);
+    // If slot was busy: releaseBrowser will handle recreation
+    if (this.busySlots.has(slotIndex)) {
+      logInfo(`Browser slot ${slotIndex} disconnected while busy, will recreate on release`);
     }
   }
 
   async closeAll() {
+    this._closing = true; // Suppress _handleDisconnected auto-recreate
     logProgress('Closing all browsers in pool...');
+    const CLOSE_TIMEOUT = 10000; // 10s per browser
 
-    try {
-      const closePromises = this.browsers.map(browser => {
-        if (browser?.isConnected?.()) {
-          return browser.close();
-        }
-        return null;
-      });
+    const closePromises = [];
+    for (const [slot, browser] of this.browsers) {
+      if (browser?.isConnected?.()) {
+        const closeWithTimeout = new Promise((resolve) => {
+          const timer = setTimeout(() => {
+            logFail(`Timeout closing browser slot ${slot}, force killing process`);
+            try { browser.process()?.kill(); } catch (_) {}
+            resolve();
+          }, CLOSE_TIMEOUT);
 
-      await Promise.all(closePromises.filter(Boolean));
+          browser.close()
+            .then(() => { clearTimeout(timer); resolve(); })
+            .catch(err => {
+              clearTimeout(timer);
+              logFail(`Error closing browser slot ${slot}: ${err.message}`);
+              try { browser.process()?.kill(); } catch (_) {}
+              resolve();
+            });
+        });
+        closePromises.push(closeWithTimeout);
+      }
+    }
 
-      this.browsers = [];
-      this.availableBrowsers = [];
-      this.busyBrowsers.clear();
-      this.isInitialized = false;
+    await Promise.all(closePromises);
 
-      logSuccess('🟢 All browsers closed successfully');
-    } catch (error) {
-      logFail(`🔴 Error closing browsers: ${error.message}`);
+    this.browsers.clear();
+    this.availableSlots = [];
+    this.busySlots.clear();
+    this.isInitialized = false;
+    this._closing = false;
+
+    logSuccess('All browsers closed successfully');
+  }
+
+  /**
+   * Push slot to availableSlots only if not already present.
+   * Prevents duplicate slots from causing double-acquire.
+   */
+  _makeSlotAvailable(slot) {
+    if (!this.availableSlots.includes(slot)) {
+      this.availableSlots.push(slot);
     }
   }
 
   getStatus() {
     return {
       poolSize: this.poolSize,
-      totalBrowsers: this.browsers.length,
-      availableBrowsers: this.availableBrowsers.length,
-      busyBrowsers: this.busyBrowsers.size,
+      totalBrowsers: this.browsers.size,
+      availableBrowsers: this.availableSlots.length,
+      busyBrowsers: this.busySlots.size,
       isInitialized: this.isInitialized,
       profileRoot: this.profileRoot
     };

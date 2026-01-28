@@ -11,7 +11,7 @@ const { initLoginSession } = require('./LoginSession/initLoginSession');
 const { appendStatusToMainSheet } = require('./Sheets/sheetWriter');
 const { markStatusWithRetry } = require('./Sheets/markStatusByOrderId');
 const { TaskQueue } = require('./Task/taskQueue');
-const { startTaskSchedule } = require('./Task/taskScheduler');
+const { startTaskSchedule, stopTaskSchedule } = require('./Task/taskScheduler');
 const { appendAcceptedTask, removeTaskCapacity } = require('./Task/taskReporter');
 const { saveCookies } = require('./Session/sessionManager');
 const runTaskInNewBrowser = require('./Task/runTaskInNewBrowser');
@@ -72,10 +72,8 @@ function mapRejectReasonToSheetStatus(code) {
   }
 
   // หลังจาก login browser ถูกปิดแล้ว
-await cloneProfiles({ count: defaultConcurrency });
-
-
-logSuccess('✅ Profiles cloned successfully');
+  await cloneProfiles({ count: defaultConcurrency });
+  logSuccess('✅ Profiles cloned successfully');
 
   // --- Browser pool ---
   try {
@@ -88,27 +86,27 @@ logSuccess('✅ Profiles cloned successfully');
   }
 
   // Daily quota reset
-  resetIfNewDay();
+  await resetIfNewDay();
 
   let totalTasks = 0;
   let successful = 0;
 
   const metaQueue = new TaskQueue({
-  	concurrency: 2,
-  	onError: (err) => logFail(`❌ MetaQueue error: ${err.message}`),
-  	onQueueEmpty: () => logInfo('🟢 MetaQueue Idle')
-	});
+    concurrency: 2,
+    onError: (err) => logFail(`❌ MetaQueue error: ${err.message}`),
+    onQueueEmpty: () => logInfo('🟢 MetaQueue Idle')
+  });
 
-	function enqueueOnHold(orderId) {
-  	metaQueue.addTask(async () => {
-    	await markStatusWithRetry(orderId, 'On Hold');
-   		const result = await removeTaskCapacity(orderId);
+  function enqueueOnHold(orderId, workflowName, receivedDate = null) {
+    metaQueue.addTask(async () => {
+      await markStatusWithRetry(orderId, 'On Hold', 'DTP', receivedDate);
+      const result = await removeTaskCapacity(orderId, receivedDate);
 
-			if (result.ok && result.removed) {
-			  await notifyGoogleChat(`⛔ [On Hold] Workflow: ${workflowName}} | Words Left: ${result.totalWords}`);
-			}
- 		});
-	}
+      if (result.ok && result.removed) {
+        await notifyGoogleChat(`⛔ [On Hold] Workflow: ${workflowName} | Words Left: ${result.totalWords}`);
+      }
+    });
+  }
 
   const queue = new TaskQueue({
     concurrency: defaultConcurrency,
@@ -128,12 +126,13 @@ logSuccess('✅ Profiles cloned successfully');
           workflowName: res.workflowName,
           url: res.url,
           amountWords: res.amountWords,
-          plannedEndDate: res.context?.effectiveDeadline || res.plannedEndDate, 
+          plannedEndDate: res.context?.effectiveDeadline || res.plannedEndDate,
+          receivedDate: res.receivedDate || null,
           allocationPlan
         });
 
         await applyCapacity(allocationPlan);
-        await markStatusWithRetry(res.orderId, 'Accepted');
+        await markStatusWithRetry(res.orderId, 'Accepted', 'DTP', res.receivedDate);
         await trackAmountWords(res.amountWords, notifyGoogleChat);
       }
 
@@ -144,15 +143,21 @@ logSuccess('✅ Profiles cloned successfully');
       const reasonText = (err.message || '').toLowerCase();
       await recordFailure();
 
+      // Handle login expired - trigger system restart
+      if (err.message === 'LOGIN_EXPIRED') {
+        await restartForLoginExpired();
+        return;
+      }
+
       if (reasonText.includes('on hold')) {
         logFail(`❌ Task failed (On Hold) | Order ID: ${err.orderId}`, true);
-        await markStatusWithRetry(err.orderId, 'On Hold');
+        await markStatusWithRetry(err.orderId, 'On Hold', 'DTP', err.receivedDate);
         return;
       }
 
       if (reasonText.includes('404') || reasonText.includes('step 1 failed') || reasonText.includes('Unable to read status')) {
         logFail(`❌ Task failed (Missed) | Order ID: ${err.orderId} | Reason: ${err.message}`, true);
-        await markStatusWithRetry(err.orderId, 'Missed');
+        await markStatusWithRetry(err.orderId, 'Missed', 'DTP', err.receivedDate);
         return;
       }
 
@@ -167,13 +172,13 @@ logSuccess('✅ Profiles cloned successfully');
   });
 
   /* ========================= Event Listener ========================= */
-  startListeningEmails(async ({ orderId, workflowName, url, amountWords, plannedEndDate, status }) => {
+  startListeningEmails(async ({ orderId, workflowName, url, amountWords, plannedEndDate, status, receivedDate }) => {
     // 0) System-side status handling
     if ((status || '').toLowerCase() === 'on hold') {
-			logInfo(`⏸ On hold detected | Order ID: ${orderId} | Workflow: ${workflowName}`);
-			enqueueOnHold(orderId);
-			return;
-		}
+      logInfo(`⏸ On hold detected | Order ID: ${orderId} | Workflow: ${workflowName}`);
+      enqueueOnHold(orderId, workflowName, receivedDate);
+      return;
+    }
 		
     // 1) Evaluate acceptance using centralized rules
     const evalRes = evaluateTaskAcceptance({ orderId, amountWords, plannedEndDate });
@@ -181,7 +186,7 @@ logSuccess('✅ Profiles cloned successfully');
     if (!evalRes.accepted) {
       const sheetStatus = mapRejectReasonToSheetStatus(evalRes.code); // always 'Declined'
       logFail(`⛔ Rejected | Order ID: ${orderId} | ${evalRes.code} | ${evalRes.message} | raw=${evalRes.rawDeadline} effective=${evalRes.effectiveDeadline || '-'}`, true);
-      await markStatusWithRetry(orderId, sheetStatus);
+      await markStatusWithRetry(orderId, sheetStatus, 'DTP', receivedDate);
       return;
     }
 
@@ -244,11 +249,12 @@ logSuccess('✅ Profiles cloned successfully');
       if (!result.success) {
         const error = new Error(result.reason);
         error.orderId = orderId;
+        error.receivedDate = receivedDate;
         throw error; // Handled by queue.onError
       }
 
       // Attach enriched context to queue onSuccess consumer
-      return { ...result, orderId, workflowName, url, amountWords, plannedEndDate: evalRes.rawDeadline, status, context };
+      return { ...result, orderId, workflowName, url, amountWords, plannedEndDate: evalRes.rawDeadline, status, receivedDate, context };
     });
   });
 })();
@@ -257,6 +263,9 @@ logSuccess('✅ Profiles cloned successfully');
 process.on('uncaughtException', async (err) => {
   logFail('🔥 Uncaught Exception:', err);
   await notifyGoogleChat(`❌ [Auto RWS] System crash: ${err.message}`);
+  try {
+    await closeBrowserPool();
+  } catch {}
   await cleanupFetcher();
   await new Promise(res => setTimeout(res, 500));
   process.exit(1);
@@ -265,6 +274,9 @@ process.on('uncaughtException', async (err) => {
 process.on('unhandledRejection', async (reason) => {
   logFail('🔥 Unhandled Promise Rejection:', reason);
   await notifyGoogleChat(`❌ [Auto RWS] Unhandled rejection: ${reason}`);
+  try {
+    await closeBrowserPool();
+  } catch {}
   await cleanupFetcher();
   await new Promise(res => setTimeout(res, 500));
   process.exit(1);
@@ -276,9 +288,10 @@ process.on('SIGINT', async () => {
   await notifyGoogleChat('🔴 [Auto RWS] System shutdown initiated (SIGINT)');
 
   try {
+    stopTaskSchedule();
     await closeBrowserPool();
     await cleanupFetcher();
-    logSuccess('Browser pool closed successfully');
+    logSuccess('Shutdown completed successfully');
     process.exit(0);
   } catch (err) {
     logFail(`Error during shutdown: ${err.message}`);
@@ -289,8 +302,9 @@ process.on('SIGINT', async () => {
 process.on('SIGTERM', async () => {
   logProgress('Received SIGTERM, shutting down gracefully...');
   try {
+    stopTaskSchedule();
     await closeBrowserPool();
-    logSuccess('Browser pool closed successfully');
+    logSuccess('Shutdown completed successfully');
     process.exit(0);
   } catch (err) {
     logFail(`Error during shutdown: ${err.message}`);
@@ -304,6 +318,7 @@ async function restartForLoginExpired(reason = 'LOGIN_EXPIRED') {
   await notifyGoogleChat(`🔄 [Auto RWS] Login expired. Restarting system...`);
 
   try {
+    stopTaskSchedule();
     await closeBrowserPool();
     await cleanupFetcher();
   } catch {}

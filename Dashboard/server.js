@@ -39,10 +39,19 @@ const {
   loadDailyOverride,
   saveDailyOverride,
   getCapacityMap,
- getOverrideMap,
- adjustCapacity,
-  resetCapacityMap
+  getOverrideMap,
+  adjustCapacity,
+  resetCapacityMap,
+  releaseCapacity,
+  getRemainingCapacity,
+  syncCapacityWithTasks
 } = require('../Task/CapacityTracker');
+
+const {
+  loadAndFilterTasks,
+  summarizeTasks,
+  acceptedTasksPath
+} = require('../Task/taskReporter');
 
 app.use(bodyParser.json());
 app.use(express.static(path.join(__dirname, "../public")));
@@ -82,6 +91,23 @@ app.post('/api/capacity/reset', (req, res) => {
   res.json({ success: true });
 });
 
+// POST sync capacity with tasks
+app.post('/api/capacity/sync', (req, res) => {
+  try {
+    const result = syncCapacityWithTasks();
+    if (result.success) {
+      // Broadcast ไปทุก client
+      const dates = Object.keys(result.after);
+      dates.forEach(date => {
+        broadcastToClients({ type: 'capacityUpdated', date });
+      });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 // POST /api/release
 app.post('/api/release', (req, res) => {
   const plan = req.body; // [{ date, amount }]
@@ -104,6 +130,80 @@ app.get('/api/capacity/:date', (req, res) => {
   res.json({ remaining });
 });
 
+// GET /api/tasks - ดึงข้อมูล tasks (read-only, ไม่เคลียร์ completed)
+app.get('/api/tasks', (req, res) => {
+  try {
+    if (!fs.existsSync(acceptedTasksPath)) {
+      return res.json({ tasks: [], summary: null, lastUpdated: new Date().toISOString() });
+    }
+    const raw = fs.readFileSync(acceptedTasksPath, 'utf-8');
+    const tasks = JSON.parse(raw);
+    const summary = summarizeTasks(tasks);
+    res.json({ tasks, summary, lastUpdated: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/tasks/refresh - ดึงจาก Sheet + เคลียร์ completed/on-hold + sync capacity (รวมทุกอย่างเป็น API เดียว)
+app.post('/api/tasks/refresh', async (req, res) => {
+  let activeTasks = [];
+  let completedCount = 0;
+  let onHoldCount = 0;
+  let summary = null;
+  let syncResult = { success: false, after: {}, diff: 0, deletedOverrides: [] };
+  const errors = [];
+
+  // Step 1: Query Sheet + ลบ completed/on-hold tasks
+  try {
+    const result = await loadAndFilterTasks();
+    activeTasks = result.activeTasks;
+    completedCount = result.completedCount;
+    onHoldCount = result.onHoldCount || 0;
+    summary = summarizeTasks(activeTasks);
+  } catch (err) {
+    errors.push({ step: 'loadAndFilterTasks', error: err.message });
+  }
+
+  // Step 2: Sync capacity กับ tasks (คำนวณใหม่จาก allocationPlan)
+  try {
+    syncResult = syncCapacityWithTasks();
+  } catch (err) {
+    errors.push({ step: 'syncCapacityWithTasks', error: err.message });
+  }
+
+  // Step 3: Broadcast ไปทุก client (ทำแม้มี error บางส่วน)
+  if (completedCount > 0 || onHoldCount > 0) {
+    broadcastToClients({
+      type: 'tasksUpdated',
+      completedCount,
+      onHoldCount
+    });
+  }
+
+  // Broadcast capacityUpdated ถ้ามีการเปลี่ยนแปลง
+  if (syncResult.success && syncResult.diff !== 0) {
+    const dates = Object.keys(syncResult.after || {});
+    dates.forEach(date => {
+      broadcastToClients({ type: 'capacityUpdated', date });
+    });
+  }
+
+  res.json({
+    success: errors.length === 0,
+    tasks: activeTasks,
+    summary,
+    completedCount,
+    onHoldCount,
+    capacity: syncResult?.after ?? {},
+    synced: syncResult.success,
+    syncDiff: syncResult?.diff ?? 0,
+    deletedOverrides: syncResult?.deletedOverrides ?? [],
+    lastUpdated: new Date().toISOString(),
+    errors: errors.length > 0 ? errors : undefined
+  });
+});
+
 async function cleanupOldCapacityAndOverride(datesToDelete = null) {
   const today = dayjs().format("YYYY-MM-DD");
   const capacityPath = path.join(__dirname, '../public/capacity.json');
@@ -117,6 +217,39 @@ async function cleanupOldCapacityAndOverride(datesToDelete = null) {
     if (datesToDelete) return datesToDelete.includes(date);
     return date < today;
   };
+
+  // ลบเฉพาะ allocationPlan ของวันที่เลือก (ไม่ลบ task ทั้งตัว)
+  let allocationsRemoved = 0;
+  let tasksRemoved = 0;
+  try {
+    if (fs.existsSync(acceptedTasksPath)) {
+      const raw = fs.readFileSync(acceptedTasksPath, 'utf-8');
+      const tasks = JSON.parse(raw);
+
+      const updatedTasks = tasks.map(task => {
+        if (!task.allocationPlan) return task;
+
+        const originalLength = task.allocationPlan.length;
+        task.allocationPlan = task.allocationPlan.filter(plan => !shouldDelete(plan.date));
+        allocationsRemoved += originalLength - task.allocationPlan.length;
+
+        return task;
+      }).filter(task => {
+        // ลบ task ถ้าไม่เหลือ allocationPlan เลย
+        if (task.allocationPlan && task.allocationPlan.length === 0) {
+          tasksRemoved++;
+          return false;
+        }
+        return true;
+      });
+
+      if (allocationsRemoved > 0 || tasksRemoved > 0) {
+        fs.writeFileSync(acceptedTasksPath, JSON.stringify(updatedTasks, null, 2));
+      }
+    }
+  } catch (err) {
+    console.error("❌ Failed to cleanup tasks:", err.message);
+  }
 
   for (const date of Object.keys(cap)) {
     if (shouldDelete(date)) {
@@ -139,34 +272,25 @@ async function cleanupOldCapacityAndOverride(datesToDelete = null) {
     console.error("❌ Failed to write capacity/override:", err.message);
   }
 
-  if (deleted.length > 0) {
-    logInfo(`🧹 ลบ capacity/override วันที่: ${deleted.join(", ")}`);
+  if (deleted.length > 0 || allocationsRemoved > 0) {
+    logInfo(`🧹 ลบ capacity/override วันที่: ${deleted.join(", ")} | Allocations: ${allocationsRemoved} | Tasks: ${tasksRemoved}`);
     for (const d of deleted) {
       broadcastToClients({ type: "capacityUpdated", date: d });
     }
+    if (allocationsRemoved > 0 || tasksRemoved > 0) {
+      broadcastToClients({ type: "tasksUpdated" });
+    }
   }
+
+  return { deleted, allocationsRemoved, tasksRemoved };
 }
 
-
-const cron = require('node-cron');
-
-const cleanupJob = cron.schedule('1 0 * * *', async () => {
-  const start = Date.now();
-  logInfo(`[CRON] ✅ Cleanup job started at ${new Date().toISOString()}`);
-  try {
-    await cleanupOldCapacityAndOverride();
-  } catch (err) {
-    logInfo(`[CRON] ❌ Cleanup failed: ${err.message}`);
-  } finally {
-    logInfo(`[CRON] ⏱ Took ${Date.now() - start} ms`);
-  }
-});
 
 app.post("/api/cleanup", async (req, res) => {
   try {
     const dates = req.body?.dates;
-    await cleanupOldCapacityAndOverride(dates); // ✅ ใช้ argument
-    res.json({ success: true });
+    const result = await cleanupOldCapacityAndOverride(dates);
+    res.json({ success: true, ...result });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
@@ -205,6 +329,26 @@ wss.on("connection", (ws) => {
   ws.on("message", (msg) => {
     try {
       const data = JSON.parse(msg);
+
+      // Handle ping from frontend
+      if (data.type === "ping") {
+        ws.send(JSON.stringify({ type: "pong" }));
+        return;
+      }
+
+      // Handle refresh request
+      if (data.type === "refresh") {
+        const { pending, success, error } = getAllStatus();
+        ws.send(JSON.stringify({
+          type: "updateStatus",
+          pending,
+          success,
+          error,
+          imapPaused: isImapPaused()
+        }));
+        return;
+      }
+
       if (data.type === "togglePause") {
         if (isImapPaused()) {
           resumeImap();

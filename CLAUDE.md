@@ -18,6 +18,17 @@ node main.js
 # Run with PM2 (production)
 pm2 start ecosystem.config.js
 
+# PM2 management
+pm2 logs AutoRWS          # View logs
+pm2 restart AutoRWS       # Restart
+pm2 stop AutoRWS          # Stop
+
+# Run tests
+npm test                  # Run all tests
+npm run test:watch        # Watch mode
+npm run test:coverage     # With coverage report
+npm run test:verbose      # Verbose output
+
 # Dashboard available at
 http://localhost:3000
 ```
@@ -45,6 +56,8 @@ http://localhost:3000
 | `Session/sessionManager.js` | Cookie storage and reuse |
 | `Logs/logger.js` | Colored console logging |
 | `Logs/notifier.js` | Google Chat webhook notifications |
+| `Utils/retryHandler.js` | Generic retry wrapper with configurable attempts |
+| `Utils/taskTimeout.js` | Promise timeout wrapper |
 
 ### Task Acceptance Rules (`Task/taskAcceptance.js`)
 
@@ -59,6 +72,18 @@ Rejection codes: `REJECT_URGENT_OUT_OF_HOURS`, `REJECT_CAPACITY`, `REJECT_INVALI
 ### Browser Pool Pattern
 
 Each browser instance uses a dedicated Chrome profile (`Session/chrome-profiles/profile_N`). The pool auto-recreates disconnected browsers with the same slot index.
+
+### Exec Workflow (`Exec/execAccept.js`)
+
+Steps for accepting a task on Moravia platform:
+1. **STEP 1**: Click "Change Status" button (`#taskActionConfirm`)
+2. **STEP 2**: Open Attachments tab
+3. **STEP 3**: Expand Source section (chevron icon)
+4. **STEP 4**: Click file link to trigger licence modal
+5. **STEP 5**: Select licence from dropdown → choose "EQHOmoraviateam"
+6. **STEP 6**: Click "Set licence" button
+
+**Known Issue**: Select2 dropdown IDs are dynamic (e.g., `#select2-chosen-1` may become `#select2-chosen-16`). Use class selectors (`.select2-chosen`) or text content matching instead of hardcoded IDs.
 
 ## Configuration
 

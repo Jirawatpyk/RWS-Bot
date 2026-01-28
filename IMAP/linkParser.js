@@ -1,8 +1,11 @@
 
 const cheerio = require('cheerio');
 const dayjs = require('dayjs');
+const customParseFormat = require('dayjs/plugin/customParseFormat');
+dayjs.extend(customParseFormat);
 
 function extractOrderIdFromEmail(emailTextOrHtml = '') {
+  if (!emailTextOrHtml) return null;
   const match = emailTextOrHtml.match(/\[#(\d+)\]/);
   return match ? match[1] : null;
 }
@@ -32,6 +35,7 @@ function parseMoraviaLinksFromEmail(emailTextOrHtml) {
 }
 
 function extractMetricsFromEmail(emailHtml = '') {
+  if (!emailHtml) emailHtml = '';
   const $ = cheerio.load(emailHtml);
 
   // 🔍 Step 1: Try cheerio first
@@ -44,10 +48,10 @@ function extractMetricsFromEmail(emailHtml = '') {
     amountsText = m ? m[1] : null;
   }
   if (!deadlineText) {
-    const d1 = emailHtml.match(/plannedEndDate\s*[:：]?\s*['"]?([0-9./:\sAPMapm]+)['"]?/i);
+    const d1 = emailHtml.match(/plannedEndDate\s*[:：]?\s*['"]?([0-9./:\ -APMapm]+)['"]?/i);
     deadlineText = d1 ? d1[1] : null;
     if (!deadlineText) {
-      const d2 = emailHtml.match(/plannedEndDate\s*[:：]?\s*([0-9./:\sAPMapm]+)/i);
+      const d2 = emailHtml.match(/plannedEndDate\s*[:：]?\s*([0-9./:\s-APMapm]+)/i);
       deadlineText = d2 ? d2[1] : null;
     }
   }
@@ -58,7 +62,12 @@ function extractMetricsFromEmail(emailHtml = '') {
 
   let normalizedDate = null;
   if (deadlineText) {
-    const cleaned = deadlineText.replace(/\(.*?\)/g, '').trim();
+    // Remove parentheses content, quotes, and trailing punctuation
+    const cleaned = deadlineText
+      .replace(/\(.*?\)/g, '')  // Remove (UTC+7) etc
+      .replace(/["']/g, '')      // Remove quotes
+      .replace(/[(\s]+$/, '')    // Remove trailing parenthesis and spaces
+      .trim();
     const parsed = dayjs(cleaned, [
       'DD.MM.YYYY h:mm A',
       'DD.MM.YYYY h:mmA',

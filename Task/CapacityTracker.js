@@ -6,11 +6,10 @@ const dayjs = require('dayjs');
 const isSameOrBefore = require('dayjs/plugin/isSameOrBefore');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
 const isBusinessDay = require('./isBusinessDay');
+const { maxDailyCapacity: MAX_DAILY_CAPACITY } = require('../Config/configs');
 
 dayjs.extend(isSameOrBefore);
 dayjs.extend(customParseFormat);
-
-const MAX_DAILY_CAPACITY = 12000;
 let capacityMap = {};
 
 function loadDailyOverride() {
@@ -56,27 +55,30 @@ function getAvailableDates(requiredWords, deadlineStr, excludeToday = false) {
     'DD.MM.YYYY h:mm A', 'DD/MM/YYYY h:mm A', 'DD-MM-YYYY h:mm A'
   ], true);
 
+  // Validate deadline
+  if (!deadline.isValid()) {
+    console.error('[CapacityTracker] Invalid deadline format:', deadlineStr);
+    return [];
+  }
+
   let businessDates = [];
   let cursor = today;
 
   while (cursor.isSameOrBefore(deadline, 'day')) {
-    const dayOfWeek = cursor.day(); // 0 = Sunday, 6 = Saturday
-    if (dayOfWeek >= 1 && dayOfWeek <= 5 && isBusinessDay(cursor)) {
+    if (isBusinessDay(cursor)) {  // isBusinessDay already checks weekends
       businessDates.push(cursor.format('YYYY-MM-DD'));
     }
     cursor = cursor.add(1, 'day');
   }
 
-const now = dayjs();
+  // Filter by deadline and excludeToday flag
+  const todayStr = today.format('YYYY-MM-DD');
+  businessDates = businessDates.filter(d =>
+    dayjs(d).isSameOrBefore(deadline, 'day') &&
+    (!excludeToday || d !== todayStr)
+  );
 
-// เพิ่ม flag กรองภายนอก
-const todayStr = today.format('YYYY-MM-DD');
-businessDates = businessDates.filter(d =>
-  dayjs(d).isSameOrBefore(deadline, 'day') &&
-  (!excludeToday || d !== todayStr)
-);
-
-businessDates.sort(); 
+  businessDates.sort(); 
 
   const isUrgent = businessDates.length < 3;
   const allocationPlan = [];
@@ -113,44 +115,46 @@ businessDates.sort();
       }
     }
 
-// 🔁 รอบสอง: เติมคำที่เหลือให้วันไหนว่าง (เรียงจากวันที่เหลือ space เยอะสุด → วันก่อนหน้า)
-if (remaining > 0) {
-  const sortedBySpace = businessDates
-    .map(dateStr => {
-      const used = capacityMap[dateStr] || 0;
-      const plan = allocationPlan.find(p => p.date === dateStr);
-      const alreadyUsed = plan ? plan.amount : 0;
-      const max = overrideMap[dateStr] || MAX_DAILY_CAPACITY;
-      const spaceLeft = max - used - alreadyUsed;
-      return { date: dateStr, spaceLeft };
-    })
-    .filter(entry => entry.spaceLeft > 0)
-    .sort((a, b) => {
-      if (b.spaceLeft !== a.spaceLeft) return b.spaceLeft - a.spaceLeft;
-      return a.date.localeCompare(b.date); // ถ้า space เท่ากัน → เลือกวันก่อน
-    });
+    // 🔁 รอบสอง: เติมคำที่เหลือให้วันไหนว่าง (เรียงจากวันที่เหลือ space เยอะสุด → วันก่อนหน้า)
+    if (remaining > 0) {
+      const sortedBySpace = businessDates
+        .map(dateStr => {
+          const used = capacityMap[dateStr] || 0;
+          const plan = allocationPlan.find(p => p.date === dateStr);
+          const alreadyUsed = plan ? plan.amount : 0;
+          const max = overrideMap[dateStr] || MAX_DAILY_CAPACITY;
+          const spaceLeft = max - used - alreadyUsed;
+          return { date: dateStr, spaceLeft };
+        })
+        .filter(entry => entry.spaceLeft > 0)
+        .sort((a, b) => {
+          if (b.spaceLeft !== a.spaceLeft) return b.spaceLeft - a.spaceLeft;
+          return a.date.localeCompare(b.date); // ถ้า space เท่ากัน → เลือกวันก่อน
+        });
 
-  for (const { date: dateStr, spaceLeft } of sortedBySpace) {
-    const toAdd = Math.min(spaceLeft, remaining);
-    if (toAdd <= 0) continue;
+      for (const { date: dateStr, spaceLeft } of sortedBySpace) {
+        const toAdd = Math.min(spaceLeft, remaining);
+        if (toAdd <= 0) continue;
 
-    const existing = allocationPlan.find(p => p.date === dateStr);
-    if (existing) {
-      existing.amount += toAdd;
-    } else {
-      allocationPlan.push({ date: dateStr, amount: toAdd });
+        const existing = allocationPlan.find(p => p.date === dateStr);
+        if (existing) {
+          existing.amount += toAdd;
+        } else {
+          allocationPlan.push({ date: dateStr, amount: toAdd });
+        }
+
+        remaining -= toAdd;
+        if (remaining <= 0) break;
+      }
     }
+  }
 
-    remaining -= toAdd;
-    if (remaining <= 0) break;
-  }
-}
-  }
-	allocationPlan.sort((a, b) => a.date.localeCompare(b.date));
-	return allocationPlan;
+  allocationPlan.sort((a, b) => a.date.localeCompare(b.date));
+  return allocationPlan;
 }
 
 function applyCapacity(plan) {
+  loadCapacityMap();  // Load latest before modifying
   for (const { date, amount } of plan) {
     if (!capacityMap[date]) capacityMap[date] = 0;
     capacityMap[date] += amount;
@@ -165,14 +169,6 @@ function getReport() {
     .join('\n');
 }
 
-function canFitWithinDeadline(dates, deadlineStr) {
-  const deadline = dayjs(deadlineStr, [
-    'YYYY-MM-DD','DD/MM/YYYY','DD-MM-YYYY','DD.MM.YYYY', 'YYYY-MM-DD HH:mm',
-    'DD.MM.YYYY h:mm A','DD/MM/YYYY h:mm A','DD-MM-YYYY h:mm A']
-  , true);
-  return dates.length > 0 && dayjs(dates[dates.length - 1]).isSameOrBefore(deadline, 'day');
-}
-
 function getRemainingCapacity(date) {
   loadCapacityMap();
   const overrideMap = loadDailyOverride();
@@ -182,12 +178,14 @@ function getRemainingCapacity(date) {
 }
 
 function adjustCapacity({ date, amount }) {
+  loadCapacityMap();  // Load latest before modifying
   if (!capacityMap[date]) capacityMap[date] = 0;
   capacityMap[date] = Math.max(0, capacityMap[date] + amount);
   saveCapacityMap();
 }
 
 function releaseCapacity(plan) {
+  loadCapacityMap();  // โหลดข้อมูลล่าสุดก่อน release
   for (const { date, amount } of plan) {
     const used = capacityMap[date] || 0;
     const safeRelease = Math.min(amount, used);
@@ -203,6 +201,80 @@ function resetCapacityMap() {
   saveCapacityMap();
 }
 
+/**
+ * Sync capacity กับ tasks ใน acceptedTasks.json
+ * คำนวณ capacity ใหม่จาก allocationPlan ของทุก tasks
+ * และ cleanup dailyOverride วันเก่า
+ */
+function syncCapacityWithTasks() {
+  const acceptedTasksPath = path.join(__dirname, 'acceptedTasks.json');
+  const today = dayjs().format('YYYY-MM-DD');
+
+  let tasks = [];
+  try {
+    if (fs.existsSync(acceptedTasksPath)) {
+      const raw = fs.readFileSync(acceptedTasksPath, 'utf-8');
+      tasks = JSON.parse(raw);
+
+      // Validate tasks is an array
+      if (!Array.isArray(tasks)) {
+        console.error('[CapacityTracker] acceptedTasks.json is not an array');
+        return { success: false, error: 'Invalid tasks format: expected array' };
+      }
+    }
+  } catch (err) {
+    console.error('❌ Failed to read acceptedTasks.json:', err.message);
+    return { success: false, error: err.message };
+  }
+
+  // คำนวณ capacity ใหม่จาก allocationPlan
+  loadCapacityMap();
+  const beforeCapacity = { ...capacityMap };
+
+  const newCapacity = {};
+  for (const task of tasks) {
+    if (task.allocationPlan && Array.isArray(task.allocationPlan)) {
+      for (const plan of task.allocationPlan) {
+        newCapacity[plan.date] = (newCapacity[plan.date] || 0) + plan.amount;
+      }
+    }
+  }
+
+  // อัปเดต capacityMap
+  capacityMap = newCapacity;
+  saveCapacityMap();
+
+  // Cleanup dailyOverride วันเก่า (< today)
+  const overrideMap = loadDailyOverride();
+  const beforeOverride = { ...overrideMap };
+  let deletedOverrides = [];
+
+  for (const date of Object.keys(overrideMap)) {
+    if (date < today) {
+      delete overrideMap[date];
+      deletedOverrides.push(date);
+    }
+  }
+
+  if (deletedOverrides.length > 0) {
+    saveDailyOverride(overrideMap);
+  }
+
+  const totalBefore = Object.values(beforeCapacity).reduce((a, b) => a + b, 0);
+  const totalAfter = Object.values(newCapacity).reduce((a, b) => a + b, 0);
+
+  return {
+    success: true,
+    taskCount: tasks.length,
+    before: beforeCapacity,
+    after: newCapacity,
+    totalBefore,
+    totalAfter,
+    diff: totalAfter - totalBefore,
+    deletedOverrides
+  };
+}
+
 module.exports = {
   getAvailableDates,
   applyCapacity,
@@ -210,8 +282,8 @@ module.exports = {
   adjustCapacity,
   getReport,
   getRemainingCapacity,
-  canFitWithinDeadline,
   resetCapacityMap,
+  syncCapacityWithTasks,
   loadDailyOverride,
   saveDailyOverride,
   loadCapacityMap,

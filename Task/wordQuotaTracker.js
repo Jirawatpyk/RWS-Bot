@@ -26,8 +26,22 @@ function loadQuota() {
   }
 }
 
-function saveQuota(data) {
-  fs.writeFileSync(QUOTA_FILE, JSON.stringify(data, null, 2));
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function saveQuota(data, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      fs.writeFileSync(QUOTA_FILE, JSON.stringify(data, null, 2));
+      return true;
+    } catch (err) {
+      if (attempt === retries) {
+        logFail(`❌ Failed to save wordQuota.json after ${retries} attempts: ${err.message}`);
+        return false;
+      }
+      // รอสักครู่แล้ว retry (file อาจถูก lock ชั่วคราว)
+      await delay(attempt * 100);
+    }
+  }
 }
 
 async function trackAmountWords(amount, notifyFn = console.log) {
@@ -38,7 +52,7 @@ async function trackAmountWords(amount, notifyFn = console.log) {
   const alertedSteps = data[`${key}_alertedSteps`] || [];
 
   data[key] = (data[key] || 0) + amount;
-  saveQuota(data);
+  await saveQuota(data);
 
   const currentTotal = data[key];
   logInfo(`🧮 Word count tracked: total ${currentTotal} words (added ${amount})`);
@@ -53,10 +67,10 @@ async function trackAmountWords(amount, notifyFn = console.log) {
   }
 
   data[`${key}_alertedSteps`] = alertedSteps;
-  saveQuota(data);
+  await saveQuota(data);
 }
 
-function resetIfNewDay() {
+async function resetIfNewDay() {
   const data = loadQuota();
   const currentKey = getTimeWindowKey();
 
@@ -67,7 +81,7 @@ function resetIfNewDay() {
     }
   });
 
-  saveQuota(data);
+  await saveQuota(data);
 }
 
 module.exports = {

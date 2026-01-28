@@ -1,0 +1,29 @@
+{
+  "watch": [
+    "main.js",
+    "Config/",
+    "Dashboard/",
+    "Exec/",
+    "IMAP/",
+    "LoginSession/",
+    "Logs/",
+    "Session/",
+    "Sheets/",
+    "Task/",
+    "Utils/"
+  ],
+  "ignore": [
+    "*.json",
+    "Task/acceptedTasks.json",
+    "Task/wordQuota.json",
+    "IMAP/seenUids_*.json",
+    "IMAP/uidStore_*.json",
+    "public/",
+    "__tests__/",
+    "coverage/",
+    "node_modules/",
+    "docs/"
+  ],
+  "ext": "js",
+  "delay": 2000
+}

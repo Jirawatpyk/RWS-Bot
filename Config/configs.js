@@ -21,18 +21,21 @@ module.exports = {
             TrackingSheet: {
                 sheetId: process.env.SHEET_ID_Tracking, // เชื่อมต่อ Data
                 tabName: 'PM_Tracking',
-                    statusColumn: 'B', 
+                    statusColumn: 'B',
                     orderIdColumn: 'F',
                     pmNameColumn: 'C',
+                    receivedDateColumn: 'N',
 
             Assignment: {
-                tabName: 'Assignment', 
-                workflowNameColumn: 'F', 
-                projectStatusColumn: 'L'
+                tabName: 'Assignment',
+                workflowNameColumn: 'F',
+                projectStatusColumn: 'L',
+                receivedDateColumn: 'D'
                     }
                 }
             },
   defaultConcurrency: 4,
+  maxDailyCapacity: 12000,
   maxRetries: 1,
   forceLogin: process.env.FORCE_LOGIN === 'true',
   googleChatWebhook: process.env.GOOGLE_CHAT_WEBHOOK,
