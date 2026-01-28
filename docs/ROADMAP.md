@@ -215,367 +215,123 @@ app.post('/api/override', authenticateAPI, async (req, res) => { ... });
 
 ### 2.1 Architecture Improvements
 
-#### [ ] 13. แยก main.js ออกเป็น Event Bus + Command Pattern
+#### [x] 13. แยก main.js ออกเป็น Event Bus + Command Pattern -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** God Object 400+ lines, 30+ imports
 **ไฟล์:** `main.js`, `Core/eventBus.js` (new), `Core/commandHandler.js` (new)
 
-**แนวทางแก้:**
-- ใช้ EventEmitter สำหรับ inter-module communication
-- แยก initialization logic ออกเป็น bootstrapper
-- ใช้ Command Pattern สำหรับ task operations
-
-```javascript
-// Core/eventBus.js
-const EventEmitter = require('events');
-class SystemEventBus extends EventEmitter {
-  // Typed events
-  emitTaskReceived(task) { this.emit('task:received', task); }
-  emitTaskAccepted(task) { this.emit('task:accepted', task); }
-  emitTaskRejected(task, reason) { this.emit('task:rejected', task, reason); }
-}
-
-// main.js (simplified)
-const eventBus = new SystemEventBus();
-const imapModule = new IMAPModule(eventBus);
-const taskQueue = new TaskQueue(eventBus);
-const browserPool = new BrowserPool(eventBus);
-
-eventBus.on('task:received', task => taskQueue.enqueue(task));
-eventBus.on('task:accepted', task => sheetWriter.logAccepted(task));
-```
+**ผลลัพธ์:**
+- Refactored `main.js` ให้ใช้ modular event-driven architecture
+- Dashboard APIs: `/api/state`, `/api/config` สำหรับ system state inspection
+- Dashboard UI: SystemHealth component แสดง real-time system status
 
 ---
 
-#### [ ] 14. สร้าง Persistent Task Queue (Redis/SQLite)
+#### [x] 14. สร้าง Persistent Task Queue (Redis/SQLite) -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** In-memory queue → process crash = tasks หาย
 **ไฟล์:** `Task/taskQueue.js`, `Task/persistentQueue.js` (new)
 
-**แนวทางแก้:**
-- ใช้ SQLite สำหรับ local persistence
-- หรือ Redis สำหรับ distributed setup
-- เพิ่ม task state tracking (pending/processing/completed/failed)
-
-```javascript
-// Task/persistentQueue.js (SQLite approach)
-const Database = require('better-sqlite3');
-
-class PersistentTaskQueue {
-  constructor(dbPath) {
-    this.db = new Database(dbPath);
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        id INTEGER PRIMARY KEY,
-        task_data TEXT,
-        status TEXT DEFAULT 'pending',
-        created_at INTEGER,
-        updated_at INTEGER
-      )
-    `);
-  }
-
-  enqueue(task) {
-    const stmt = this.db.prepare('INSERT INTO tasks (task_data, created_at) VALUES (?, ?)');
-    stmt.run(JSON.stringify(task), Date.now());
-  }
-
-  dequeue() {
-    return this.db.transaction(() => {
-      const task = this.db.prepare('SELECT * FROM tasks WHERE status = "pending" LIMIT 1').get();
-      if (task) {
-        this.db.prepare('UPDATE tasks SET status = "processing" WHERE id = ?').run(task.id);
-        return { ...task, task_data: JSON.parse(task.task_data) };
-      }
-    })();
-  }
-
-  markCompleted(taskId) {
-    this.db.prepare('UPDATE tasks SET status = "completed", updated_at = ? WHERE id = ?')
-      .run(Date.now(), taskId);
-  }
-}
-```
+**ผลลัพธ์:**
+- สร้าง persistent task queue พร้อม state tracking (pending/processing/completed/failed)
+- Dashboard APIs: `/api/queue/status`, `/api/queue/recent`, `/api/queue/retry/:id`, `/api/queue/cleanup`
+- Dashboard UI: QueueMonitor component แสดง real-time queue status, sortable table, retry/cleanup actions
 
 ---
 
-#### [ ] 15. สร้าง State Manager (Single Source of Truth)
+#### [x] 15. สร้าง State Manager (Single Source of Truth) -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** State กระจาย 4 ที่ (Memory, JSON files, Sheets, WebSocket)
 **ไฟล์:** `State/stateManager.js` (new)
 
-**แนวทางแก้:**
-- Centralized state with pub-sub pattern
-- Sync เฉพาะจาก state manager → external (Sheets, WebSocket)
-- Read-only access สำหรับ modules
-
-```javascript
-// State/stateManager.js
-class StateManager extends EventEmitter {
-  constructor() {
-    super();
-    this.state = {
-      capacity: new Map(),
-      tasks: new Map(),
-      browserPool: { active: 0, total: 0 },
-      imapStatus: 'disconnected'
-    };
-  }
-
-  updateCapacity(date, wordCount) {
-    this.state.capacity.set(date, wordCount);
-    this.emit('state:capacity:changed', { date, wordCount });
-  }
-
-  getCapacity(date) {
-    return this.state.capacity.get(date) || 0;
-  }
-
-  // Snapshot for persistence
-  serialize() { return JSON.stringify(Array.from(this.state.capacity)); }
-  deserialize(json) { this.state.capacity = new Map(JSON.parse(json)); }
-}
-
-// Sync to Google Sheets (listener)
-stateManager.on('state:capacity:changed', async ({ date, wordCount }) => {
-  await sheetWriter.updateCapacity(date, wordCount);
-});
-
-// Sync to WebSocket
-stateManager.on('state:capacity:changed', ({ date, wordCount }) => {
-  io.emit('capacityUpdated', { date, wordCount });
-});
-```
+**ผลลัพธ์:**
+- สร้าง centralized state management พร้อม pub-sub pattern
+- Dashboard APIs: `/api/state`, `/api/sync/status`, `/api/sync/trigger`
+- Dashboard UI: SystemHealth component แสดง sync status + manual trigger button
 
 ---
 
-#### [ ] 16. เพิ่ม Circuit Breaker สำหรับ Google Sheets API
+#### [x] 16. เพิ่ม Circuit Breaker สำหรับ Google Sheets API -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** Peak load → quota exhaustion, ไม่มี rate limit
 **ไฟล์:** `Utils/circuitBreaker.js` (new), `Sheets/sheetWriter.js`
 
-**แนวทางแก้:**
-- ใช้ `opossum` library หรือเขียนเอง
-- เพิ่ม retry with exponential backoff
-- Fallback เก็บ pending writes ใน queue
-
-```javascript
-// Utils/circuitBreaker.js
-const CircuitBreaker = require('opossum');
-
-function createSheetCircuitBreaker(sheetFunction) {
-  const options = {
-    timeout: 10000,           // 10s timeout
-    errorThresholdPercentage: 50,
-    resetTimeout: 30000,      // 30s before retry
-    volumeThreshold: 5        // Min requests before trip
-  };
-
-  const breaker = new CircuitBreaker(sheetFunction, options);
-
-  breaker.on('open', () => logger.warn('Circuit breaker OPEN - Sheets API unavailable'));
-  breaker.on('halfOpen', () => logger.info('Circuit breaker HALF_OPEN - Testing recovery'));
-  breaker.on('close', () => logger.info('Circuit breaker CLOSED - Sheets API recovered'));
-
-  return breaker;
-}
-
-// Usage
-const writeToSheet = createSheetCircuitBreaker(async (data) => {
-  await sheets.spreadsheets.values.append({ /* ... */ });
-});
-
-try {
-  await writeToSheet(taskData);
-} catch (err) {
-  if (err.code === 'EOPENBREAKER') {
-    // Fallback: queue for later
-    pendingWrites.push(taskData);
-  }
-}
-```
+**ผลลัพธ์:**
+- สร้าง `Utils/circuitBreaker.js` พร้อม CLOSED/OPEN/HALF_OPEN states
+- Dashboard APIs: `/api/health/sheets` returns circuit breaker state + success/failure counts
+- Dashboard UI: SystemHealth Sheets card แสดง circuit state + สี status dot
 
 ---
 
-#### [ ] 17. สร้าง Browser Pool Health Check
+#### [x] 17. สร้าง Browser Pool Health Check -- DONE
 **Priority:** 🟡 Medium
-**ปัญหा:** ไม่มี health check — orphaned pages ไม่มีใครตรวจจับ
-**ไฟล์:** `BrowserPool/browserPool.js`, `BrowserPool/healthMonitor.js` (new)
+**ปัญหา:** ไม่มี health check — orphaned pages ไม่มีใครตรวจจับ
+**ไฟล์:** ,  (new)
 
-**แนวทางแก้:**
-- Periodic check (ทุก 5 นาที) — page count, memory usage
-- Auto-restart browser ถ้า memory > threshold
-- Report metrics ผ่าน metrics collector
-
-```javascript
-class BrowserHealthMonitor {
-  constructor(browserPool, metricsCollector) {
-    this.pool = browserPool;
-    this.metrics = metricsCollector;
-  }
-
-  async startMonitoring() {
-    setInterval(async () => {
-      for (const [slotId, browser] of this.pool.browsers.entries()) {
-        const pages = await browser.pages();
-        const metrics = await this.getProcessMetrics(browser);
-
-        if (pages.length > 20 || metrics.memoryMB > 500) {
-          logger.warn(`Browser ${slotId} unhealthy: ${pages.length} pages, ${metrics.memoryMB}MB`);
-          await this.pool.recycleBrowser(slotId);
-        }
-      }
-    }, 5 * 60 * 1000);
-  }
-
-  async getProcessMetrics(browser) {
-    const metrics = await browser.pages()[0].metrics();
-    return { memoryMB: metrics.JSHeapUsedSize / 1024 / 1024 };
-  }
-}
-```
-
+**ผลลัพธ์:**
+- Browser health monitoring พร้อม periodic check, page count, recycle tracking
+- Dashboard APIs:  returns pool stats + health monitor data
+- Dashboard UI: SystemHealth Browser card แสดง active/total, pages, recycled count
 ---
 
 ### 2.2 Feature Enhancements
 
-#### [ ] 18. Smart Capacity Learning
+#### [x] 18. Smart Capacity Learning -- DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Capacity เป็น manual setting ไม่ปรับตามประสิทธิภาพจริง
 **ไฟล์:** `Features/capacityLearner.js` (new)
 
-**แนวทางแก้:**
-- วิเคราะห์ข้อมูลย้อนหลัง 30 วัน (accepted tasks vs. actual capacity used)
-- แนะนำ optimal capacity ต่อวัน
-- Display ใน dashboard เป็น suggestion
-
-```javascript
-// Features/capacityLearner.js
-class CapacityLearner {
-  async analyzePastPerformance(days = 30) {
-    const history = await this.fetchTaskHistory(days);
-
-    const dailyStats = history.reduce((acc, task) => {
-      const date = task.acceptedDate;
-      if (!acc[date]) acc[date] = { allocated: 0, used: 0 };
-      acc[date].allocated = task.capacityAllocated;
-      acc[date].used += task.wordCount;
-      return acc;
-    }, {});
-
-    const suggestions = {};
-    for (const [date, stats] of Object.entries(dailyStats)) {
-      const utilizationRate = stats.used / stats.allocated;
-      if (utilizationRate > 0.9) {
-        suggestions[date] = Math.ceil(stats.allocated * 1.2); // +20%
-      } else if (utilizationRate < 0.5) {
-        suggestions[date] = Math.ceil(stats.allocated * 0.8); // -20%
-      }
-    }
-
-    return suggestions;
-  }
-}
-```
+**ผลลัพธ์:**
+- Capacity analysis + recommendation engine (increase/decrease/maintain) พร้อม confidence level
+- Dashboard APIs: `/api/capacity/analysis`, `/api/capacity/suggestions`, `/api/capacity/summary`
+- Dashboard UI: CapacityInsights component แสดง recommendation badge, Chart.js line chart (daily words 30 days), suggestions list, avg/peak/slow stats
 
 ---
 
-#### [ ] 19. Post-Acceptance Verification
+#### [x] 19. Post-Acceptance Verification -- DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Accept แล้วไม่รู้ว่าสำเร็จจริงหรือไม่
 **ไฟล์:** `Features/postAcceptVerifier.js` (new)
 
-**แนวทางแก้:**
-- หลัง Accept รอ 30 วินาที แล้ว verify status ใน Moravia
-- ถ้าไม่สำเร็จ → auto-rollback capacity + alert
-- Log verification result ใน Sheets
-
-```javascript
-async function verifyAcceptance(taskUrl, orderId) {
-  await sleep(30000); // Wait 30s for system update
-
-  const page = await browser.newPage();
-  await page.goto(taskUrl);
-
-  const status = await page.$eval('#taskStatus', el => el.textContent);
-
-  if (status !== 'Accepted') {
-    logger.error(`Verification failed for ${orderId}: status = ${status}`);
-    await rollbackCapacity(orderId);
-    await notifier.alert(`Task ${orderId} acceptance failed - rolled back`);
-    return false;
-  }
-
-  return true;
-}
-```
+**ผลลัพธ์:**
+- Post-acceptance verification system พร้อม auto-rollback capacity + alert on failure
+- Dashboard APIs: `/api/verification/status`, `/api/verification/results`
+- Dashboard UI: SystemHealth verification section แสดง pending/passed/failed counts
 
 ---
 
-#### [ ] 20. Dynamic Working Hours
+#### [x] 20. Dynamic Working Hours -- DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Working hours ตายตัว ไม่ปรับตาม holiday/OT
 **ไฟล์:** `Task/workingHoursManager.js` (new), `Config/holidays.json`
 
-**แนวทางแก้:**
-- อ่าน holiday calendar จาก `Config/holidays.json`
-- รองรับ OT schedule (override working hours สำหรับวันที่กำหนด)
-- API endpoint สำหรับจัดการ `/api/working-hours`
-
-```javascript
-// Task/workingHoursManager.js
-class WorkingHoursManager {
-  constructor() {
-    this.holidays = require('../Config/holidays.json');
-    this.overtimeSchedule = {}; // { '2026-01-30': { start: 8, end: 21 } }
-  }
-
-  getWorkingHours(date) {
-    const dateStr = date.toISOString().split('T')[0];
-
-    // Check OT override
-    if (this.overtimeSchedule[dateStr]) {
-      return this.overtimeSchedule[dateStr];
-    }
-
-    // Check holiday
-    if (this.holidays.includes(dateStr)) {
-      return null; // No working hours
-    }
-
-    // Default
-    return { start: 10, end: 19 };
-  }
-
-  setOvertimeSchedule(date, hours) {
-    this.overtimeSchedule[date] = hours;
-  }
-}
-```
+**ผลลัพธ์:**
+- Dynamic working hours manager พร้อม holiday calendar + OT schedule
+- Dashboard APIs: `/api/working-hours`, `/api/working-hours/overtime` (GET/POST/DELETE), `/api/holidays` (GET/POST/DELETE), `/api/holidays/working` (POST/DELETE)
+- Dashboard UI: WorkingHoursManager component พร้อม calendar view (color-coded days), 3 tabs (Calendar/Holidays/Overtime), CRUD forms, Today button, date validation
 
 ---
 
-#### [ ] 21. Multi-Language Email Parser
+#### [x] 21. Multi-Language Email Parser -- DONE
 **Priority:** 🔵 Low
 **ปัญหา:** Parser ตรงกับ template ภาษาอังกฤษเท่านั้น
 **ไฟล์:** `IMAP/linkParser.js`, `IMAP/i18nParser.js` (new)
 
-**แนวทางแก้:**
-- รองรับ regex patterns หลายภาษา (TH, JP, DE, etc.)
-- Auto-detect language จาก email headers
+**ผลลัพธ์:**
+- Multi-language email parsing พร้อม auto-detect language จาก headers
 - Fallback เป็น English parser
 
 ---
 
-#### [ ] 22. Real-time Status Sync จาก Moravia
+#### [x] 22. Real-time Status Sync จาก Moravia -- DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** ต้อง query Sheet เพื่อดู status — ไม่ real-time
 **ไฟล์:** `Features/moraviaStatusSync.js` (new)
 
-**แนวทางแก้:**
-- ถ้า Moravia มี webhook → รับ event ตรง
-- ถ้าไม่มี → polling ทุก 5 นาที
-- Update dashboard WebSocket real-time
+**ผลลัพธ์:**
+- Real-time status sync พร้อม polling mechanism
+- Dashboard APIs: `/api/sync/status`, `/api/sync/trigger`
+- Dashboard UI: SystemHealth sync section แสดง last sync time + manual trigger button
 
 ---
 
@@ -735,11 +491,12 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 - [x] Health monitoring + alerting operational -- Tasks 6, 7
 
 ### Phase 2 Readiness Criteria
-- [ ] State management centralized
-- [ ] Persistent task queue implemented
-- [ ] Google Sheets circuit breaker active
-- [ ] Event Bus architecture refactored
-- [ ] At least 2 new features deployed (Smart Capacity / Post-Acceptance Verification)
+- [x] State management centralized -- Task 15
+- [x] Persistent task queue implemented -- Task 14
+- [x] Google Sheets circuit breaker active -- Task 16
+- [x] Event Bus architecture refactored -- Task 13
+- [x] At least 2 new features deployed (Smart Capacity / Post-Acceptance Verification) -- Tasks 18, 19
+- [x] Dashboard UI สำหรับ Phase 2 APIs ทั้งหมด (4 panels: SystemHealth, QueueMonitor, WorkingHoursManager, CapacityInsights)
 
 ### Phase 3 Readiness Criteria
 - [ ] Test coverage >80%
@@ -762,14 +519,16 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 | Phase | Started | Completed | Progress |
 |-------|---------|-----------|----------|
 | Phase 1: Quick Wins | 2026-01-28 | - | 11/12 (Section 1.1 tasks 1,3,4,5 + Section 1.2 tasks 6,7,8 + Section 1.3 done) |
-| Phase 2: Medium Term | - | - | 0/10 |
+| Phase 2: Medium Term | 2026-01-28 | 2026-01-28 | **10/10** ✅ (Tasks 13-22 backend + Dashboard UI) |
 | Phase 3: Long Term | - | - | 0/8 |
 
 **Last Updated:** 2026-01-28
 **Section 1.1 Completed (partial):** 2026-01-28 (Tasks 1, 3, 4, 5 -- reviewed and approved by senior-dev)
 **Section 1.2 Completed:** 2026-01-28 (Tasks 6, 7, 8 -- reviewed and approved by senior-dev)
 **Section 1.3 Completed:** 2026-01-28 (Tasks 9-12, reviewed by code-reviewer + senior-dev)
+**Phase 2 Completed:** 2026-01-28 (Tasks 13-22 backend + Dashboard UI 4 panels, reviewed by ux-designer + code-reviewer + senior-dev)
 **Remaining Phase 1:** Task 2 (Dashboard Auth)
+**Next Phase:** Phase 3 Long Term
 **Next Review:** 2026-02-28
 
 ---
