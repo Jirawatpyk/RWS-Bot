@@ -17,11 +17,31 @@ user_data/
 Logs/
 *.log
 
+# Runtime JSON data
+Task/acceptedTasks.json
+Task/wordQuota.json
+IMAP/seenUids_*.json
+IMAP/uidStore_*.json
+public/capacity.json
+public/capacityLog.json
+public/dailyOverride.json
+
+# Test artifacts
+coverage/
+
 # OS files
 .DS_Store
 Thumbs.db
 *.lnk
+nul
 
 # IDE
 .vscode/
 .idea/
+
+# Claude Code local settings
+.claude/settings.local.json
+
+# Backup / temp
+backup_layout/
+*.eml
