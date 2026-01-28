@@ -220,6 +220,41 @@ class ApiService {
   async getDailyOverride() {
     return this.get(CONFIG.API.DAILY_OVERRIDE);
   }
+
+  // ============================================
+  // Phase 2 API Methods
+  // ============================================
+
+  async getHealthBrowser() { return this.get(CONFIG.API.HEALTH_BROWSER); }
+  async getHealthImap() { return this.get(CONFIG.API.HEALTH_IMAP); }
+  async getHealthSheets() { return this.get(CONFIG.API.HEALTH_SHEETS); }
+  async getMetrics() { return this.get(CONFIG.API.METRICS); }
+  async getState() { return this.get(CONFIG.API.STATE); }
+  async getSyncStatus() { return this.get(CONFIG.API.SYNC_STATUS); }
+  async triggerSync() { return this.post(CONFIG.API.SYNC_TRIGGER); }
+  async getVerificationStatus() { return this.get(CONFIG.API.VERIFICATION_STATUS); }
+  async getVerificationResults() { return this.get(CONFIG.API.VERIFICATION_RESULTS); }
+
+  async getWorkingHours(date) {
+    return date ? this.get(`/api/working-hours/${date}`) : this.get(CONFIG.API.WORKING_HOURS);
+  }
+  async getOvertime() { return this.get(CONFIG.API.OVERTIME); }
+  async addOvertime(data) { return this.post(CONFIG.API.OVERTIME, data); }
+  async removeOvertime(date) { return this.delete(`${CONFIG.API.OVERTIME}/${date}`); }
+  async getHolidays(year) { return this.get(CONFIG.API.HOLIDAYS, year ? { year } : {}); }
+  async addHoliday(data) { return this.post(CONFIG.API.HOLIDAYS, data); }
+  async removeHoliday(date) { return this.delete(`${CONFIG.API.HOLIDAYS}/${date}`); }
+  async addWorkingHoliday(date) { return this.post('/api/holidays/working', { date }); }
+  async removeWorkingHoliday(date) { return this.delete(`/api/holidays/working/${date}`); }
+
+  async getQueueStatus() { return this.get(CONFIG.API.QUEUE_STATUS); }
+  async getQueueRecent(limit = 50) { return this.get(CONFIG.API.QUEUE_RECENT, { limit }); }
+  async retryTask(id) { return this.post(`/api/queue/retry/${id}`); }
+  async cleanupQueue(olderThanDays = 7) { return this.post('/api/queue/cleanup', { olderThanDays }); }
+
+  async getCapacityAnalysis(days) { return this.get(CONFIG.API.CAPACITY_ANALYSIS, days ? { days } : {}); }
+  async getCapacitySuggestions() { return this.get(CONFIG.API.CAPACITY_SUGGESTIONS); }
+  async getCapacitySummary() { return this.get(CONFIG.API.CAPACITY_SUMMARY); }
 }
 
 /**

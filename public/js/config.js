@@ -17,7 +17,26 @@ export const CONFIG = {
     ADJUST: '/api/adjust',
     CLEANUP: '/api/cleanup',
     ACCEPTED_TASKS: '/api/tasks',
-    DAILY_OVERRIDE: '/dailyOverride.json'
+    DAILY_OVERRIDE: '/dailyOverride.json',
+
+    // Phase 2 APIs
+    HEALTH_BROWSER: '/api/health/browser',
+    HEALTH_IMAP: '/api/health/imap',
+    HEALTH_SHEETS: '/api/health/sheets',
+    METRICS: '/api/metrics',
+    STATE: '/api/state',
+    SYNC_STATUS: '/api/sync/status',
+    SYNC_TRIGGER: '/api/sync/trigger',
+    VERIFICATION_STATUS: '/api/verification/status',
+    VERIFICATION_RESULTS: '/api/verification/results',
+    WORKING_HOURS: '/api/working-hours',
+    OVERTIME: '/api/working-hours/overtime',
+    HOLIDAYS: '/api/holidays',
+    QUEUE_STATUS: '/api/queue/status',
+    QUEUE_RECENT: '/api/queue/recent',
+    CAPACITY_ANALYSIS: '/api/capacity/analysis',
+    CAPACITY_SUGGESTIONS: '/api/capacity/suggestions',
+    CAPACITY_SUMMARY: '/api/capacity/summary'
   },
 
   // WebSocket

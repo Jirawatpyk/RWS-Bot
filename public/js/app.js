@@ -19,6 +19,10 @@ import TaskReport from './components/TaskReport.js';
 import CalendarView from './components/CalendarView.js';
 import SetDailyLimit from './components/SetDailyLimit.js';
 import AdjustUsage from './components/AdjustUsage.js';
+import SystemHealth from './components/SystemHealth.js';
+import QueueMonitor from './components/QueueMonitor.js';
+import WorkingHoursManager from './components/WorkingHoursManager.js';
+import CapacityInsights from './components/CapacityInsights.js';
 
 class App {
   constructor() {
@@ -119,6 +123,19 @@ class App {
     // Adjust Usage
     this.components.adjustUsage = new AdjustUsage('#adjust-usage');
     this.components.adjustUsage?.mount();
+
+    // Phase 2 Components
+    this.components.systemHealth = new SystemHealth('#system-health');
+    this.components.systemHealth?.mount();
+
+    this.components.queueMonitor = new QueueMonitor('#queue-monitor');
+    this.components.queueMonitor?.mount();
+
+    this.components.workingHours = new WorkingHoursManager('#working-hours');
+    this.components.workingHours?.mount();
+
+    this.components.capacityInsights = new CapacityInsights('#capacity-insights');
+    this.components.capacityInsights?.mount();
 
     console.log('[App] Components mounted');
   }
