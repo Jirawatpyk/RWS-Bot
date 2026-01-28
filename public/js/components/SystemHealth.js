@@ -288,7 +288,6 @@ class SystemHealth {
     const rawResults = d.recentResults || d.results || [];
     // API may return lastVerification (single object) instead of array
     const results = Array.isArray(rawResults) ? rawResults : [];
-    const completed = d.completed || results.length;
     const passCount = results.filter(r => r.verified === true || r.status === 'passed').length;
     const failCount = results.filter(r => r.verified === false || r.status === 'failed').length;
 

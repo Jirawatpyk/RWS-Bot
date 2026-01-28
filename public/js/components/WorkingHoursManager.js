@@ -424,6 +424,12 @@ class WorkingHoursManager {
         // Backend expects { date, start: number, end: number }
         const start = parseInt(startTime.split(':')[0], 10);
         const end = parseInt(endTime.split(':')[0], 10);
+        if (isNaN(start) || isNaN(end) || start < 0 || end > 23 || start >= end) {
+          document.dispatchEvent(new CustomEvent('toast:show', {
+            detail: { type: 'error', message: 'Invalid time range' }
+          }));
+          return;
+        }
         await api.post('/api/working-hours/overtime', { date, start, end });
         document.dispatchEvent(new CustomEvent('toast:show', {
           detail: { type: 'success', message: 'Overtime scheduled' }
