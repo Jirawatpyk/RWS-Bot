@@ -88,6 +88,10 @@ module.exports = {
   /* ========================= Browser Pool ========================= */
   BROWSER_POOL: {
     DEFAULT_CONCURRENCY: 4,                     // configs.js (default pool size)
+    PAGE_CLEANUP_INTERVAL: 5 * 60 * 1000,       // 5 minutes - periodic orphaned page scan
+    PAGE_WARNING_THRESHOLD: 10,                 // warn when browser has > 10 pages
+    PAGE_FORCE_CLEANUP_THRESHOLD: 20,           // force close old pages when > 20
+    PAGE_MAX_AGE: 10 * 60 * 1000,               // 10 minutes - max page age for force cleanup
   },
 
   /* ========================= Reporting Schedule (hours) ========================= */

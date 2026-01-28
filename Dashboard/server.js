@@ -31,6 +31,7 @@ const { getAllStatus } = require("./statusManager/taskStatusStore");
 const { logSuccess, logInfo } = require("../Logs/logger");
 const { pauseImap, resumeImap, isImapPaused } = require("../IMAP/imapClient");
 const { TIMEOUTS } = require('../Config/constants');
+const { withFileLock, saveJSONAtomic } = require('../Utils/fileUtils');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -85,15 +86,15 @@ app.get('/api/capacity', (req, res) => {
 });
 
 // POST reset capacity
-app.post('/api/capacity/reset', (req, res) => {
-  resetCapacityMap();
+app.post('/api/capacity/reset', async (req, res) => {
+  await resetCapacityMap();
   res.json({ success: true });
 });
 
 // POST sync capacity with tasks
-app.post('/api/capacity/sync', (req, res) => {
+app.post('/api/capacity/sync', async (req, res) => {
   try {
-    const result = syncCapacityWithTasks();
+    const result = await syncCapacityWithTasks();
     if (result.success) {
       // Broadcast ไปทุก client
       const dates = Object.keys(result.after);
@@ -108,18 +109,18 @@ app.post('/api/capacity/sync', (req, res) => {
 });
 
 // POST /api/release
-app.post('/api/release', (req, res) => {
+app.post('/api/release', async (req, res) => {
   const plan = req.body; // [{ date, amount }]
   if (!Array.isArray(plan)) return res.status(400).json({ error: 'Invalid plan format' });
-  releaseCapacity(plan);
+  await releaseCapacity(plan);
   res.json({ success: true });
 });
 
 // POST /api/adjust
-app.post('/api/adjust', (req, res) => {
+app.post('/api/adjust', async (req, res) => {
   const { date, amount } = req.body;
   if (!date || typeof amount !== 'number') return res.status(400).json({ error: 'Invalid input' });
-  adjustCapacity({ date, amount });
+  await adjustCapacity({ date, amount });
   res.json({ success: true });
 });
 
@@ -166,7 +167,7 @@ app.post('/api/tasks/refresh', async (req, res) => {
 
   // Step 2: Sync capacity กับ tasks (คำนวณใหม่จาก allocationPlan)
   try {
-    syncResult = syncCapacityWithTasks();
+    syncResult = await syncCapacityWithTasks();
   } catch (err) {
     errors.push({ step: 'syncCapacityWithTasks', error: err.message });
   }
@@ -265,8 +266,11 @@ async function cleanupOldCapacityAndOverride(datesToDelete = null) {
   }
 
   try {
-    await fs.promises.writeFile(capacityPath, JSON.stringify(cap, null, 2));
-    await fs.promises.writeFile(overridePath, JSON.stringify(override, null, 2));
+    await withFileLock(capacityPath, () => {
+      saveJSONAtomic(capacityPath, cap);
+    });
+    // dailyOverride.json is not concurrently written, but use atomic write for safety
+    saveJSONAtomic(overridePath, override);
   } catch (err) {
     console.error("❌ Failed to write capacity/override:", err.message);
   }

@@ -1,6 +1,7 @@
 const retry = require('../Utils/retryHandler');
 const withTimeout = require('../Utils/taskTimeout');
 const { logSuccess, logFail, logInfo, logProgress } = require('../Logs/logger');
+const { BrowserAutomationError } = require('../Errors/customErrors');
 
 // CONSTANTS
 const TIMEOUTS = {
@@ -163,7 +164,12 @@ async function step1_ChangeStatus(page) {
     logSuccess('STEP 1: Clicked Change Status button.');
     return { success: true };
   } catch (err) {
-    return { success: false, reason: `STEP 1 failed: ${err.message}` };
+    const reason = `STEP 1 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: new BrowserAutomationError(reason, 'STEP_1', { selector: SELECTORS.CHANGE_STATUS_BTN })
+    };
   }
 }
 
@@ -223,7 +229,12 @@ async function openAttachmentsTab(page) {
     logSuccess('STEP 2: Attachments tab opened.');
     return { success: true };
   } catch (err) {
-    return { success: false, reason: `STEP 2 failed: ${err.message}` };
+    const reason = `STEP 2 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: new BrowserAutomationError(reason, 'STEP_2', { selector: SELECTORS.ATTACHMENTS_TAB })
+    };
   }
 }
 
@@ -273,7 +284,12 @@ async function expandSourceSection(page) {
 
     return { success: true };
   } catch (err) {
-    return { success: false, reason: `STEP 3 failed: ${err.message}` };
+    const reason = `STEP 3 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: new BrowserAutomationError(reason, 'STEP_3', { context: 'Source chevron expand' })
+    };
   }
 }
 
@@ -293,7 +309,12 @@ async function triggerLicenceModal(page) {
     logSuccess('STEP 4: File link clicked.');
     return { success: true };
   } catch (err) {
-    return { success: false, reason: `STEP 4 failed: ${err.message}` };
+    const reason = `STEP 4 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: new BrowserAutomationError(reason, 'STEP_4', { selector: SELECTORS.FILE_LINK })
+    };
   }
 }
 
@@ -352,7 +373,12 @@ async function selectLicenceAndConfirm(page) {
     logSuccess('STEP 5: Licence selected.');
     return { success: true };
   } catch (err) {
-    return { success: false, reason: `STEP 5 failed: ${err.message}` };
+    const reason = `STEP 5 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: new BrowserAutomationError(reason, 'STEP_5', { context: 'Licence dropdown selection' })
+    };
   }
 }
 
@@ -371,7 +397,12 @@ async function clickSetLicenceButton(page) {
     logSuccess('STEP 6: Licence set successfully.');
     return { success: true };
   } catch (err) {
-    return { success: false, reason: `STEP 6 failed: ${err.message}` };
+    const reason = `STEP 6 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: new BrowserAutomationError(reason, 'STEP_6', { selector: SELECTORS.SET_LICENCE_BTN })
+    };
   }
 }
 
@@ -410,7 +441,14 @@ async function step2to6_Workflow(page) {
 
     return { success: true, reason: 'Licence set successfully.' };
   } catch (err) {
-    return { success: false, reason: `Steps 2-6 failed: ${err.message}` };
+    const reason = `Steps 2-6 failed: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: err instanceof BrowserAutomationError
+        ? err
+        : new BrowserAutomationError(reason, 'STEP_2TO6', { originalError: err.message })
+    };
   }
 }
 
@@ -475,6 +513,9 @@ async function checkLoginStatus(page) {
  * @returns {Promise<{success: boolean, reason?: string, url?: string}>} Result object
  */
 module.exports = async function execAccept({ page, url }) {
+  // Track any fallback page created during retry so we can clean it up
+  let fallbackPage = null;
+
   try {
     logProgress('Starting Moravia task acceptance');
     let currentPage = page;
@@ -487,20 +528,21 @@ module.exports = async function execAccept({ page, url }) {
 
       try {
         const newPage = await page.browser().newPage();
+        fallbackPage = newPage; // track for cleanup
         await newPage.goto(url, { waitUntil: 'networkidle2', timeout: TIMEOUTS.PAGE_LOAD });
 
-        if (page !== newPage) {
-          try {
-            await page.close();
-          } catch (closeErr) {
-            logInfo(`Failed to close old page: ${closeErr.message}`);
-          }
-        }
+        // Don't close the original page -- it's managed by the caller (browserPool.releasePage).
+        // Only switch our reference for the remaining workflow steps.
         logSuccess('Retried with new tab and succeeded.');
 
         currentPage = newPage;
 
       } catch (retryErr) {
+        // Close fallback page on failure to prevent leak
+        if (fallbackPage) {
+          try { if (!fallbackPage.isClosed()) await fallbackPage.close(); } catch (_) {}
+          fallbackPage = null;
+        }
         return {
           success: false,
           reason: `Retry goto failed: ${retryErr.message}`,
@@ -539,6 +581,18 @@ module.exports = async function execAccept({ page, url }) {
     const step2to6 = await retry(step2WithTimeout, CONFIG.STEP2TO6_RETRIES, CONFIG.RETRY_DELAY);
     return step2to6;
   } catch (err) {
-    return { success: false, reason: `Error: ${err.message}` };
+    const reason = `Error: ${err.message}`;
+    return {
+      success: false,
+      reason,
+      error: err instanceof BrowserAutomationError
+        ? err
+        : new BrowserAutomationError(reason, 'EXEC_ACCEPT', { url, originalError: err.message })
+    };
+  } finally {
+    // Clean up fallback page if it was created and is separate from the original
+    if (fallbackPage && fallbackPage !== page) {
+      try { if (!fallbackPage.isClosed()) await fallbackPage.close(); } catch (_) {}
+    }
   }
 };

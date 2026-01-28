@@ -17,6 +17,43 @@ const dayjs = require('dayjs');
 // Mock fs module
 jest.mock('fs');
 
+// Mock fileUtils — provide real loadJSON/saveJSON with mocked fs,
+// plus pass-through withFileLock and saveJSONAtomic
+jest.mock('../../Utils/fileUtils', () => {
+  const fs = require('fs');
+  const path = require('path');
+
+  function loadJSON(filePath, defaultValue = {}) {
+    try {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      return JSON.parse(raw);
+    } catch {
+      return defaultValue;
+    }
+  }
+
+  function saveJSON(filePath, data, options = {}) {
+    const { spaces = 2 } = options;
+    fs.writeFileSync(filePath, JSON.stringify(data, null, spaces));
+  }
+
+  function saveJSONAtomic(filePath, data, options = {}) {
+    // In tests, just write directly (no .tmp + rename)
+    saveJSON(filePath, data, options);
+  }
+
+  async function withFileLock(filePath, fn) {
+    // In tests, just execute fn without locking
+    return await fn();
+  }
+
+  async function loadJSONWithLock(filePath, defaultValue = {}) {
+    return loadJSON(filePath, defaultValue);
+  }
+
+  return { loadJSON, saveJSON, saveJSONAtomic, withFileLock, loadJSONWithLock };
+});
+
 // Mock isBusinessDay
 jest.mock('../../Task/isBusinessDay', () => (date) => {
   const dayOfWeek = date.day();
@@ -62,6 +99,8 @@ describe('Task/CapacityTracker.js', () => {
     });
 
     // Setup fs.writeFileSync to update mock data
+    // Note: saveJSONAtomic writes to .tmp first, then renames.
+    // Both .tmp and direct writes must update mock data.
     fs.writeFileSync.mockImplementation((filePath, data) => {
       if (filePath.includes('capacity.json')) {
         mockCapacityData = JSON.parse(data);
@@ -70,6 +109,12 @@ describe('Task/CapacityTracker.js', () => {
         mockOverrideData = JSON.parse(data);
       }
     });
+
+    // Mock renameSync for saveJSONAtomic (write .tmp → rename)
+    fs.renameSync.mockImplementation(() => {});
+
+    // Mock mkdirSync for directory creation
+    fs.mkdirSync.mockImplementation(() => {});
 
     fs.existsSync.mockReturnValue(true);
   });
@@ -641,7 +686,7 @@ describe('Task/CapacityTracker.js', () => {
   });
 
   describe('applyCapacity()', () => {
-    it('should apply allocation plan to capacity map', () => {
+    it('should apply allocation plan to capacity map', async () => {
       loadCapacityMap(); // Load empty capacityMap first
 
       const plan = [
@@ -649,13 +694,13 @@ describe('Task/CapacityTracker.js', () => {
         { date: '2026-01-27', amount: 3000 }
       ];
 
-      applyCapacity(plan);
+      await applyCapacity(plan);
 
       expect(mockCapacityData['2026-01-26']).toBe(5000);
       expect(mockCapacityData['2026-01-27']).toBe(3000);
     });
 
-    it('should accumulate capacity on same date', () => {
+    it('should accumulate capacity on same date', async () => {
       mockCapacityData = {
         '2026-01-26': 3000
       };
@@ -665,14 +710,14 @@ describe('Task/CapacityTracker.js', () => {
         { date: '2026-01-26', amount: 2000 }
       ];
 
-      applyCapacity(plan);
+      await applyCapacity(plan);
 
       expect(mockCapacityData['2026-01-26']).toBe(5000); // 3000 + 2000
     });
   });
 
   describe('releaseCapacity()', () => {
-    it('should release capacity from plan', () => {
+    it('should release capacity from plan', async () => {
       mockCapacityData = {
         '2026-01-26': 8000,
         '2026-01-27': 5000
@@ -684,13 +729,13 @@ describe('Task/CapacityTracker.js', () => {
         { date: '2026-01-27', amount: 2000 }
       ];
 
-      releaseCapacity(plan);
+      await releaseCapacity(plan);
 
       expect(mockCapacityData['2026-01-26']).toBe(5000); // 8000 - 3000
       expect(mockCapacityData['2026-01-27']).toBe(3000); // 5000 - 2000
     });
 
-    it('should not go below zero when releasing', () => {
+    it('should not go below zero when releasing', async () => {
       mockCapacityData = {
         '2026-01-26': 2000
       };
@@ -700,12 +745,12 @@ describe('Task/CapacityTracker.js', () => {
         { date: '2026-01-26', amount: 5000 } // Try to release more than available
       ];
 
-      releaseCapacity(plan);
+      await releaseCapacity(plan);
 
       expect(mockCapacityData['2026-01-26']).toBe(0); // Should not go negative
     });
 
-    it('should handle releasing from non-existent date', () => {
+    it('should handle releasing from non-existent date', async () => {
       mockCapacityData = {};
       loadCapacityMap(); // Load empty capacity
 
@@ -714,49 +759,49 @@ describe('Task/CapacityTracker.js', () => {
       ];
 
       // Should not throw error
-      expect(() => releaseCapacity(plan)).not.toThrow();
+      await expect(releaseCapacity(plan)).resolves.not.toThrow();
     });
   });
 
   describe('adjustCapacity()', () => {
-    it('should increase capacity with positive amount', () => {
+    it('should increase capacity with positive amount', async () => {
       mockCapacityData = {
         '2026-01-26': 5000
       };
       loadCapacityMap(); // Load existing capacity
 
-      adjustCapacity({ date: '2026-01-26', amount: 2000 });
+      await adjustCapacity({ date: '2026-01-26', amount: 2000 });
 
       expect(mockCapacityData['2026-01-26']).toBe(7000);
     });
 
-    it('should decrease capacity with negative amount', () => {
+    it('should decrease capacity with negative amount', async () => {
       mockCapacityData = {
         '2026-01-26': 5000
       };
       loadCapacityMap(); // Load existing capacity
 
-      adjustCapacity({ date: '2026-01-26', amount: -2000 });
+      await adjustCapacity({ date: '2026-01-26', amount: -2000 });
 
       expect(mockCapacityData['2026-01-26']).toBe(3000);
     });
 
-    it('should not go below zero when decreasing', () => {
+    it('should not go below zero when decreasing', async () => {
       mockCapacityData = {
         '2026-01-26': 5000
       };
       loadCapacityMap(); // Load existing capacity
 
-      adjustCapacity({ date: '2026-01-26', amount: -10000 });
+      await adjustCapacity({ date: '2026-01-26', amount: -10000 });
 
       expect(mockCapacityData['2026-01-26']).toBe(0);
     });
 
-    it('should create new entry for non-existent date', () => {
+    it('should create new entry for non-existent date', async () => {
       mockCapacityData = {};
       loadCapacityMap(); // Load empty capacity
 
-      adjustCapacity({ date: '2026-01-27', amount: 3000 });
+      await adjustCapacity({ date: '2026-01-27', amount: 3000 });
 
       expect(mockCapacityData['2026-01-27']).toBe(3000);
     });
@@ -827,13 +872,13 @@ describe('Task/CapacityTracker.js', () => {
   });
 
   describe('resetCapacityMap()', () => {
-    it('should clear all capacity data', () => {
+    it('should clear all capacity data', async () => {
       mockCapacityData = {
         '2026-01-26': 8000,
         '2026-01-27': 5000
       };
 
-      resetCapacityMap();
+      await resetCapacityMap();
 
       expect(mockCapacityData).toEqual({});
     });

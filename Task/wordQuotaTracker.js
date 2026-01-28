@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const { logInfo, logFail, logProgress } = require('../Logs/logger');
 const { CAPACITY, RETRIES, TIMEOUTS } = require('../Config/constants');
+const { loadJSON, saveJSON } = require('../Utils/fileUtils');
 
 const QUOTA_FILE = path.join(__dirname, 'wordQuota.json');
 const LIMIT = CAPACITY.WORD_QUOTA_LIMIT;
@@ -21,11 +22,7 @@ function getTimeWindowKey() {
 }
 
 function loadQuota() {
-  try {
-    return JSON.parse(fs.readFileSync(QUOTA_FILE, 'utf-8'));
-  } catch {
-    return {};
-  }
+  return loadJSON(QUOTA_FILE, {});
 }
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -33,7 +30,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 async function saveQuota(data, retries = RETRIES.FILE_WRITE) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      fs.writeFileSync(QUOTA_FILE, JSON.stringify(data, null, 2));
+      saveJSON(QUOTA_FILE, data);
       return true;
     } catch (err) {
       if (attempt === retries) {

@@ -22,26 +22,17 @@
 
 ### 1.1 Critical Stability & Security
 
-#### [ ] 1. แก้ Race Condition ใน capacity.json
+#### [x] 1. แก้ Race Condition ใน capacity.json -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** Concurrent tasks เขียนทับกันทำให้ capacity หาย (lost update)
-**ไฟล์:** `Task/CapacityTracker.js`, `public/capacity.json`
+**ไฟล์:** `Task/CapacityTracker.js`, `public/capacity.json`, `Utils/fileUtils.js`, `Dashboard/server.js`
 
-**แนวทางแก้:**
-- ใช้ file locking library (`proper-lockfile`) หรือ atomic write pattern
-- แทนที่ด้วย SQLite สำหรับ transactional updates
-- เพิ่ม version/timestamp เพื่อตรวจจับ conflict
-
-```javascript
-// Before: direct write (unsafe)
-fs.writeFileSync('capacity.json', JSON.stringify(data));
-
-// After: atomic write with lock
-await lockfile.lock('capacity.json.lock');
-fs.writeFileSync('capacity.json.tmp', JSON.stringify(data));
-fs.renameSync('capacity.json.tmp', 'capacity.json');
-await lockfile.unlock('capacity.json.lock');
-```
+**ผลลัพธ์:**
+- ใช้ `proper-lockfile` ผ่าน `withFileLock()` ใน `Utils/fileUtils.js`
+- Atomic write ด้วย `saveJSONAtomic()` (write .tmp then rename, Windows fallback)
+- อัพเดท `CapacityTracker.js`: `applyCapacity()`, `adjustCapacity()`, `releaseCapacity()`, `resetCapacityMap()`, `syncCapacityWithTasks()` ทั้งหมดใช้ lock
+- อัพเดท `Dashboard/server.js`: `cleanupOldCapacityAndOverride()` ใช้ `withFileLock`
+- Lock stale timeout 10s สำหรับ crash recovery, retry 5 ครั้ง
 
 ---
 
@@ -70,114 +61,49 @@ app.post('/api/override', authenticateAPI, async (req, res) => { ... });
 
 ---
 
-#### [ ] 3. แก้ Browser Page Leak
+#### [x] 3. แก้ Browser Page Leak -- DONE
 **Priority:** 🔴 High
 **ปัญหา:** `page.close()` fail → memory leak → OOM
-**ไฟล์:** `Exec/execAccept.js`, `BrowserPool/browserPool.js`
+**ไฟล์:** `BrowserPool/browserPool.js`, `Task/runTaskInNewBrowser.js`, `Exec/execAccept.js`, `Config/constants.js`
 
-**แนวทางแก้:**
-- เพิ่ม `finally` block เพื่อ force close pages
-- Track active pages ด้วย WeakMap/Set
-- เพิ่ม periodic cleanup job (ทุก 5 นาที)
-
-```javascript
-async function executeTaskSafely(browser, task) {
-  let page = null;
-  try {
-    page = await browser.newPage();
-    await doWork(page, task);
-  } finally {
-    if (page && !page.isClosed()) {
-      await page.close().catch(err => logger.error('Force close failed', err));
-    }
-  }
-}
-
-// Periodic cleanup
-setInterval(async () => {
-  for (const browser of browserPool.browsers) {
-    const pages = await browser.pages();
-    logger.warn(`Browser has ${pages.length} pages`);
-    if (pages.length > 20) { /* force cleanup */ }
-  }
-}, 5 * 60 * 1000);
-```
+**ผลลัพธ์:**
+- เพิ่ม Page Tracking ใน `BrowserPool`: `activePages` Map, `getPage()`, `releasePage()` methods
+- เพิ่ม Periodic Cleanup: `startPeriodicCleanup()` / `stopPeriodicCleanup()` / `_runPageCleanup()`
+- Thresholds จาก `Config/constants.js`: `PAGE_WARNING_THRESHOLD=10`, `PAGE_FORCE_CLEANUP_THRESHOLD=20`, `PAGE_MAX_AGE=10min`
+- `runTaskInNewBrowser.js`: ใช้ `pool.getPage()` + `pool.releasePage()` ใน finally block
+- `execAccept.js`: fallback page จาก goto retry ถูก track + cleanup ใน finally
+- `closeAll()` clears `activePages` Map และ stops cleanup interval
+- `releasePage()` handles already-closed pages gracefully ด้วย CDP fallback
 
 ---
 
-#### [ ] 4. ใช้ Custom Error Classes แทน String Matching
+#### [x] 4. ใช้ Custom Error Classes แทน String Matching -- DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Error handling ไม่สม่ำเสมอ ใช้ `error.message.includes()` แทน type checking
-**ไฟล์:** `Utils/retryHandler.js`, `Exec/execAccept.js`, `IMAP/imapClient.js`
+**ไฟล์:** `Errors/customErrors.js` (new), `Exec/execAccept.js`, `Utils/retryHandler.js`
 
-**แนวทางแก้:**
-- สร้าง `Errors/customErrors.js` สำหรับ error types
-- ใช้ `instanceof` แทน string matching
-
-```javascript
-// Errors/customErrors.js
-class TaskAcceptanceError extends Error {
-  constructor(message, code) {
-    super(message);
-    this.name = 'TaskAcceptanceError';
-    this.code = code; // REJECT_URGENT_OUT_OF_HOURS, etc.
-  }
-}
-
-class BrowserAutomationError extends Error {
-  constructor(message, step) {
-    super(message);
-    this.name = 'BrowserAutomationError';
-    this.step = step; // STEP_1, STEP_2, etc.
-  }
-}
-
-// ใช้งาน
-if (!element) {
-  throw new BrowserAutomationError('Element not found', 'STEP_1');
-}
-
-// Catch
-try {
-  await execAccept(task);
-} catch (err) {
-  if (err instanceof BrowserAutomationError && err.step === 'STEP_5') {
-    // Handle select2 dropdown specific error
-  }
-}
-```
+**ผลลัพธ์:**
+- สร้าง `Errors/customErrors.js` มี 4 classes: `TaskAcceptanceError`, `BrowserAutomationError`, `IMAPError`, `FileIOError`
+- ทุก class มี `Error.captureStackTrace` สำหรับ proper stack traces
+- `BrowserAutomationError` มี `step` + `details` properties
+- `execAccept.js`: ทุก step (1-6) throw `BrowserAutomationError` พร้อม step identifier + context
+- `retryHandler.js`: ใช้ `instanceof BrowserAutomationError` สำหรับ type-safe error logging
+- สามารถ catch แบบ `err instanceof BrowserAutomationError && err.step === 'STEP_5'`
 
 ---
 
-#### [ ] 5. สร้าง Utils สำหรับ File I/O (DRY)
+#### [x] 5. สร้าง Utils สำหรับ File I/O (DRY) -- DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Pattern `loadJSON/saveJSON` ซ้ำกว่า 10 จุด
-**ไฟล์:** `Utils/fileUtils.js` (new), `Task/CapacityTracker.js`, `Task/taskScheduler.js`
+**ไฟล์:** `Utils/fileUtils.js` (new), `Task/CapacityTracker.js`, `Task/wordQuotaTracker.js`, `Dashboard/server.js`
 
-**แนวทางแก้:**
-```javascript
-// Utils/fileUtils.js
-const fs = require('fs').promises;
-const path = require('path');
-
-async function loadJSON(filePath, defaultValue = {}) {
-  try {
-    const data = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(data);
-  } catch (err) {
-    if (err.code === 'ENOENT') return defaultValue;
-    throw err;
-  }
-}
-
-async function saveJSON(filePath, data, options = { spaces: 2 }) {
-  const dir = path.dirname(filePath);
-  await fs.mkdir(dir, { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(data, null, options.spaces));
-}
-
-module.exports = { loadJSON, saveJSON };
-```
+**ผลลัพธ์:**
+- สร้าง `Utils/fileUtils.js` มี 5 functions: `loadJSON`, `saveJSON`, `saveJSONAtomic`, `withFileLock`, `loadJSONWithLock`
+- `loadJSON`: synchronous, returns defaultValue on ENOENT, warns on other errors (EACCES, SyntaxError)
+- `saveJSON`: synchronous, auto-creates parent directories
+- `saveJSONAtomic`: write .tmp + rename pattern, Windows EPERM fallback
+- `withFileLock`: async, ใช้ `proper-lockfile` with stale=10s, retries=5
+- Refactored `CapacityTracker.js` + `wordQuotaTracker.js` ใช้ fileUtils แทน inline read/write
 
 ---
 
@@ -882,11 +808,11 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 ## 📋 Implementation Checklist
 
 ### Phase 1 Readiness Criteria
-- [ ] Zero critical race conditions (capacity.json, concurrent writes)
-- [ ] Dashboard authentication implemented
-- [ ] Browser memory leaks fixed
-- [ ] Test coverage >50% for critical paths (execAccept, taskAcceptance)
-- [ ] Health monitoring + alerting operational
+- [x] Zero critical race conditions (capacity.json, concurrent writes) -- Task 1
+- [ ] Dashboard authentication implemented -- Task 2
+- [x] Browser memory leaks fixed -- Task 3
+- [ ] Test coverage >50% for critical paths (execAccept, taskAcceptance) -- Task 8
+- [ ] Health monitoring + alerting operational -- Tasks 6, 7
 
 ### Phase 2 Readiness Criteria
 - [ ] State management centralized
@@ -915,12 +841,14 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 
 | Phase | Started | Completed | Progress |
 |-------|---------|-----------|----------|
-| Phase 1: Quick Wins | 2026-01-28 | - | 4/12 (Section 1.3 done) |
+| Phase 1: Quick Wins | 2026-01-28 | - | 8/12 (Section 1.1 tasks 1,3,4,5 + Section 1.3 done) |
 | Phase 2: Medium Term | - | - | 0/10 |
 | Phase 3: Long Term | - | - | 0/8 |
 
 **Last Updated:** 2026-01-28
+**Section 1.1 Completed (partial):** 2026-01-28 (Tasks 1, 3, 4, 5 -- reviewed and approved by senior-dev)
 **Section 1.3 Completed:** 2026-01-28 (Tasks 9-12, reviewed by code-reviewer + senior-dev)
+**Remaining Section 1.1:** Task 2 (Dashboard Auth), remaining Section 1.2: Tasks 6, 7, 8
 **Next Review:** 2026-02-28
 
 ---

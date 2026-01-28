@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const dayjs = require('dayjs');
+const { loadJSON, saveJSON, saveJSONAtomic, withFileLock } = require('../Utils/fileUtils');
 const isSameOrBefore = require('dayjs/plugin/isSameOrBefore');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
 const isBusinessDay = require('./isBusinessDay');
@@ -13,30 +14,23 @@ dayjs.extend(isSameOrBefore);
 dayjs.extend(customParseFormat);
 let capacityMap = {};
 
+const DAILY_OVERRIDE_PATH = path.join(__dirname, '../public/dailyOverride.json');
+const CAPACITY_MAP_PATH = path.join(__dirname, '../public/capacity.json');
+
 function loadDailyOverride() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, '../public/dailyOverride.json'), 'utf-8');
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return loadJSON(DAILY_OVERRIDE_PATH, {});
 }
 
 function saveDailyOverride(overrideMap) {
-  fs.writeFileSync(path.join(__dirname, '../public/dailyOverride.json'), JSON.stringify(overrideMap, null, 2));
+  saveJSON(DAILY_OVERRIDE_PATH, overrideMap);
 }
 
 function loadCapacityMap() {
-  try {
-    const raw = fs.readFileSync(path.join(__dirname, '../public/capacity.json'), 'utf-8');
-    capacityMap = JSON.parse(raw);
-  } catch {
-    capacityMap = {};
-  }
+  capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
 }
 
 function saveCapacityMap() {
-  fs.writeFileSync(path.join(__dirname, '../public/capacity.json'), JSON.stringify(capacityMap, null, 2));
+  saveJSON(CAPACITY_MAP_PATH, capacityMap);
 }
 
 function getOverrideMap() {
@@ -154,13 +148,15 @@ function getAvailableDates(requiredWords, deadlineStr, excludeToday = false) {
   return allocationPlan;
 }
 
-function applyCapacity(plan) {
-  loadCapacityMap();  // Load latest before modifying
-  for (const { date, amount } of plan) {
-    if (!capacityMap[date]) capacityMap[date] = 0;
-    capacityMap[date] += amount;
-  }
-  saveCapacityMap();
+async function applyCapacity(plan) {
+  await withFileLock(CAPACITY_MAP_PATH, () => {
+    capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
+    for (const { date, amount } of plan) {
+      if (!capacityMap[date]) capacityMap[date] = 0;
+      capacityMap[date] += amount;
+    }
+    saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+  });
 }
 
 function getReport() {
@@ -178,28 +174,34 @@ function getRemainingCapacity(date) {
   return Math.max(0, max - used);
 }
 
-function adjustCapacity({ date, amount }) {
-  loadCapacityMap();  // Load latest before modifying
-  if (!capacityMap[date]) capacityMap[date] = 0;
-  capacityMap[date] = Math.max(0, capacityMap[date] + amount);
-  saveCapacityMap();
+async function adjustCapacity({ date, amount }) {
+  await withFileLock(CAPACITY_MAP_PATH, () => {
+    capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
+    if (!capacityMap[date]) capacityMap[date] = 0;
+    capacityMap[date] = Math.max(0, capacityMap[date] + amount);
+    saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+  });
 }
 
-function releaseCapacity(plan) {
-  loadCapacityMap();  // โหลดข้อมูลล่าสุดก่อน release
-  for (const { date, amount } of plan) {
-    const used = capacityMap[date] || 0;
-    const safeRelease = Math.min(amount, used);
-    if (safeRelease > 0) {
-      capacityMap[date] = used - safeRelease;
+async function releaseCapacity(plan) {
+  await withFileLock(CAPACITY_MAP_PATH, () => {
+    capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
+    for (const { date, amount } of plan) {
+      const used = capacityMap[date] || 0;
+      const safeRelease = Math.min(amount, used);
+      if (safeRelease > 0) {
+        capacityMap[date] = used - safeRelease;
+      }
     }
-  }
-  saveCapacityMap();
+    saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+  });
 }
 
-function resetCapacityMap() {
-  capacityMap = {};
-  saveCapacityMap();
+async function resetCapacityMap() {
+  await withFileLock(CAPACITY_MAP_PATH, () => {
+    capacityMap = {};
+    saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+  });
 }
 
 /**
@@ -207,7 +209,7 @@ function resetCapacityMap() {
  * คำนวณ capacity ใหม่จาก allocationPlan ของทุก tasks
  * และ cleanup dailyOverride วันเก่า
  */
-function syncCapacityWithTasks() {
+async function syncCapacityWithTasks() {
   const acceptedTasksPath = path.join(__dirname, 'acceptedTasks.json');
   const today = dayjs().format('YYYY-MM-DD');
 
@@ -224,30 +226,37 @@ function syncCapacityWithTasks() {
       }
     }
   } catch (err) {
-    console.error('❌ Failed to read acceptedTasks.json:', err.message);
+    console.error('Failed to read acceptedTasks.json:', err.message);
     return { success: false, error: err.message };
   }
 
-  // คำนวณ capacity ใหม่จาก allocationPlan
-  loadCapacityMap();
-  const beforeCapacity = { ...capacityMap };
+  // Lock capacity.json for the entire read-compute-write cycle
+  const result = await withFileLock(CAPACITY_MAP_PATH, () => {
+    capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
+    const beforeCapacity = { ...capacityMap };
 
-  const newCapacity = {};
-  for (const task of tasks) {
-    if (task.allocationPlan && Array.isArray(task.allocationPlan)) {
-      for (const plan of task.allocationPlan) {
-        newCapacity[plan.date] = (newCapacity[plan.date] || 0) + plan.amount;
+    // คำนวณ capacity ใหม่จาก allocationPlan
+    const newCapacity = {};
+    for (const task of tasks) {
+      if (task.allocationPlan && Array.isArray(task.allocationPlan)) {
+        for (const plan of task.allocationPlan) {
+          newCapacity[plan.date] = (newCapacity[plan.date] || 0) + plan.amount;
+        }
       }
     }
-  }
 
-  // อัปเดต capacityMap
-  capacityMap = newCapacity;
-  saveCapacityMap();
+    // อัปเดต capacityMap
+    capacityMap = newCapacity;
+    saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
 
-  // Cleanup dailyOverride วันเก่า (< today)
+    const totalBefore = Object.values(beforeCapacity).reduce((a, b) => a + b, 0);
+    const totalAfter = Object.values(newCapacity).reduce((a, b) => a + b, 0);
+
+    return { beforeCapacity, newCapacity, totalBefore, totalAfter };
+  });
+
+  // Cleanup dailyOverride วันเก่า (< today) -- separate concern, no lock needed
   const overrideMap = loadDailyOverride();
-  const beforeOverride = { ...overrideMap };
   let deletedOverrides = [];
 
   for (const date of Object.keys(overrideMap)) {
@@ -261,17 +270,14 @@ function syncCapacityWithTasks() {
     saveDailyOverride(overrideMap);
   }
 
-  const totalBefore = Object.values(beforeCapacity).reduce((a, b) => a + b, 0);
-  const totalAfter = Object.values(newCapacity).reduce((a, b) => a + b, 0);
-
   return {
     success: true,
     taskCount: tasks.length,
-    before: beforeCapacity,
-    after: newCapacity,
-    totalBefore,
-    totalAfter,
-    diff: totalAfter - totalBefore,
+    before: result.beforeCapacity,
+    after: result.newCapacity,
+    totalBefore: result.totalBefore,
+    totalAfter: result.totalAfter,
+    diff: result.totalAfter - result.totalBefore,
     deletedOverrides
   };
 }

@@ -3,7 +3,7 @@ const puppeteer = require('puppeteer');
 const path = require('path');
 const fs = require('fs');
 const { logSuccess, logFail, logInfo, logProgress } = require('../Logs/logger');
-const { TIMEOUTS } = require('../Config/constants');
+const { TIMEOUTS, BROWSER_POOL } = require('../Config/constants');
 
 class BrowserPool {
   constructor(options = {}) {
@@ -22,6 +22,10 @@ class BrowserPool {
     this.isInitialized = false;
     this._initPromise = null; // Guard concurrent initialize() calls
     this._closing = false;    // Guard auto-recreate during closeAll
+
+    // Page tracking: Map<page, { createdAt, browserSlot }> for leak detection
+    this.activePages = new Map();
+    this._cleanupInterval = null;
 
     this.baseLaunchOptions = {
       headless: true,
@@ -74,6 +78,7 @@ class BrowserPool {
       }
 
       this.isInitialized = true;
+      this.startPeriodicCleanup();
       logSuccess(`Browser pool initialized successfully (${this.poolSize} browsers)`);
     } catch (error) {
       // Partial failure: close any browsers that were launched
@@ -194,7 +199,7 @@ class BrowserPool {
     } catch (error) {
       logFail(`Failed to recreate browser slot ${slot}: ${error.message}`);
       // Delay re-add to prevent tight retry loop if Chrome can't launch
-      setTimeout(() => this._makeSlotAvailable(slot), 5000);
+      setTimeout(() => this._makeSlotAvailable(slot), TIMEOUTS.BROWSER_RECREATE_DELAY);
     }
   }
 
@@ -223,6 +228,7 @@ class BrowserPool {
 
   async closeAll() {
     this._closing = true; // Suppress _handleDisconnected auto-recreate
+    this.stopPeriodicCleanup();
     logProgress('Closing all browsers in pool...');
     const CLOSE_TIMEOUT = TIMEOUTS.BROWSER_CLOSE;
 
@@ -254,6 +260,7 @@ class BrowserPool {
     this.browsers.clear();
     this.availableSlots = [];
     this.busySlots.clear();
+    this.activePages.clear();
     this.isInitialized = false;
     this._closing = false;
 
@@ -270,12 +277,176 @@ class BrowserPool {
     }
   }
 
+  // ============================== Page Tracking ==============================
+
+  /**
+   * Create a new page from a browser and track it.
+   * Use this instead of browser.newPage() directly to prevent page leaks.
+   * @param {import('puppeteer').Browser} browser - browser instance from pool
+   * @returns {Promise<import('puppeteer').Page>}
+   */
+  async getPage(browser) {
+    const page = await browser.newPage();
+    const slot = typeof browser._slotIndex === 'number' ? browser._slotIndex : -1;
+
+    this.activePages.set(page, {
+      createdAt: Date.now(),
+      browserSlot: slot,
+    });
+
+    logInfo(`Page created on slot ${slot} (active pages: ${this.activePages.size})`);
+    return page;
+  }
+
+  /**
+   * Safely close a tracked page and remove it from tracking.
+   * Handles already-closed or crashed pages gracefully.
+   * @param {import('puppeteer').Page} page
+   */
+  async releasePage(page) {
+    if (!page) return;
+
+    const meta = this.activePages.get(page);
+    this.activePages.delete(page);
+
+    try {
+      if (!page.isClosed()) {
+        await page.close();
+      }
+    } catch (err) {
+      // Page may already be closed or browser disconnected - force cleanup
+      logInfo(`releasePage: close failed (slot ${meta?.browserSlot ?? '?'}): ${err.message}`);
+      try {
+        // Attempt to remove page from browser's page list by destroying CDP session
+        const client = page._client?.();
+        if (client) {
+          await client.send('Target.closeTarget', { targetId: page.target()._targetId }).catch(() => {});
+        }
+      } catch (_) {
+        // Truly unreachable page, nothing more we can do
+      }
+    }
+
+    logInfo(`Page released from slot ${meta?.browserSlot ?? '?'} (active pages: ${this.activePages.size})`);
+  }
+
+  /**
+   * Start periodic cleanup interval that scans for orphaned/leaked pages.
+   * - Warns when any browser has more pages than PAGE_WARNING_THRESHOLD
+   * - Force closes pages older than PAGE_MAX_AGE when count exceeds PAGE_FORCE_CLEANUP_THRESHOLD
+   */
+  startPeriodicCleanup() {
+    if (this._cleanupInterval) return; // already running
+
+    const interval = BROWSER_POOL.PAGE_CLEANUP_INTERVAL;
+    logInfo(`Starting periodic page cleanup (every ${interval / 1000}s)`);
+
+    this._cleanupInterval = setInterval(() => {
+      this._runPageCleanup().catch(err => {
+        logFail(`Page cleanup error: ${err.message}`);
+      });
+    }, interval);
+
+    // Allow Node.js to exit even if interval is running
+    if (this._cleanupInterval.unref) {
+      this._cleanupInterval.unref();
+    }
+  }
+
+  /**
+   * Stop the periodic cleanup interval.
+   */
+  stopPeriodicCleanup() {
+    if (this._cleanupInterval) {
+      clearInterval(this._cleanupInterval);
+      this._cleanupInterval = null;
+      logInfo('Periodic page cleanup stopped');
+    }
+  }
+
+  /**
+   * Internal: scan all browsers for page leaks and clean up if needed.
+   */
+  async _runPageCleanup() {
+    const now = Date.now();
+    const warnThreshold = BROWSER_POOL.PAGE_WARNING_THRESHOLD;
+    const forceThreshold = BROWSER_POOL.PAGE_FORCE_CLEANUP_THRESHOLD;
+    const maxAge = BROWSER_POOL.PAGE_MAX_AGE;
+
+    let totalClosed = 0;
+
+    for (const [slot, browser] of this.browsers) {
+      if (!browser?.isConnected?.()) continue;
+
+      let pages;
+      try {
+        pages = await browser.pages();
+      } catch {
+        continue; // browser may have disconnected mid-scan
+      }
+
+      // Filter out the default about:blank page
+      const userPages = pages.filter(p => {
+        try { return p.url() !== 'about:blank'; } catch { return false; }
+      });
+
+      const pageCount = userPages.length;
+
+      if (pageCount > warnThreshold) {
+        logInfo(`[PageCleanup] Slot ${slot}: ${pageCount} pages open (warning threshold: ${warnThreshold})`);
+      }
+
+      if (pageCount > forceThreshold) {
+        logFail(`[PageCleanup] Slot ${slot}: ${pageCount} pages exceeds force threshold (${forceThreshold}), cleaning old pages...`);
+
+        for (const page of userPages) {
+          const meta = this.activePages.get(page);
+          const age = meta ? now - meta.createdAt : Infinity;
+
+          // Only close pages older than maxAge - active tasks should be younger
+          if (age > maxAge) {
+            try {
+              logInfo(`[PageCleanup] Force closing page on slot ${slot} (age: ${Math.round(age / 1000)}s)`);
+              this.activePages.delete(page);
+              if (!page.isClosed()) {
+                await page.close();
+              }
+              totalClosed++;
+            } catch (err) {
+              logInfo(`[PageCleanup] Failed to close page on slot ${slot}: ${err.message}`);
+            }
+          }
+        }
+      }
+    }
+
+    // Also clean tracked pages whose browser is gone (orphaned entries in activePages)
+    for (const [page, meta] of this.activePages) {
+      try {
+        if (page.isClosed()) {
+          this.activePages.delete(page);
+          totalClosed++;
+          logInfo(`[PageCleanup] Removed closed page from tracking (slot ${meta.browserSlot})`);
+        }
+      } catch {
+        // page reference is invalid, remove from tracking
+        this.activePages.delete(page);
+        totalClosed++;
+      }
+    }
+
+    if (totalClosed > 0) {
+      logSuccess(`[PageCleanup] Cleaned up ${totalClosed} pages (remaining tracked: ${this.activePages.size})`);
+    }
+  }
+
   getStatus() {
     return {
       poolSize: this.poolSize,
       totalBrowsers: this.browsers.size,
       availableBrowsers: this.availableSlots.length,
       busyBrowsers: this.busySlots.size,
+      activePages: this.activePages.size,
       isInitialized: this.isInitialized,
       profileRoot: this.profileRoot
     };

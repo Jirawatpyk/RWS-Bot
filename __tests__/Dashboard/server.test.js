@@ -33,21 +33,20 @@ jest.mock('../../Logs/logger', () => ({
 }));
 
 jest.mock('../../Task/CapacityTracker', () => ({
-  releaseCapacity: jest.fn(),
+  releaseCapacity: jest.fn().mockResolvedValue(undefined),
   loadDailyOverride: jest.fn(() => ({})),
   saveDailyOverride: jest.fn(),
   getCapacityMap: jest.fn(() => ({})),
   getOverrideMap: jest.fn(() => ({})),
-  adjustCapacity: jest.fn(),
-  resetCapacityMap: jest.fn(),
-  releaseCapacity: jest.fn(),
+  adjustCapacity: jest.fn().mockResolvedValue(undefined),
+  resetCapacityMap: jest.fn().mockResolvedValue(undefined),
   getRemainingCapacity: jest.fn((date) => 5000),
-  syncCapacityWithTasks: jest.fn(() => ({
+  syncCapacityWithTasks: jest.fn().mockResolvedValue({
     success: true,
     after: { '2026-01-25': 5000 },
     diff: 0,
     deletedOverrides: []
-  }))
+  })
 }));
 
 jest.mock('../../Task/taskReporter', () => {
@@ -757,7 +756,7 @@ describe('Dashboard/server.js - Task Report API Logic', () => {
     describe('POST /api/capacity/sync', () => {
       it('should sync capacity with tasks and return result', async () => {
         const { syncCapacityWithTasks } = require('../../Task/CapacityTracker');
-        syncCapacityWithTasks.mockReturnValue({
+        syncCapacityWithTasks.mockResolvedValue({
           success: true,
           after: {
             '2026-01-25': 5000,
@@ -783,9 +782,7 @@ describe('Dashboard/server.js - Task Report API Logic', () => {
 
       it('should handle sync errors gracefully', async () => {
         const { syncCapacityWithTasks } = require('../../Task/CapacityTracker');
-        syncCapacityWithTasks.mockImplementation(() => {
-          throw new Error('Sync failed');
-        });
+        syncCapacityWithTasks.mockRejectedValue(new Error('Sync failed'));
 
         const response = await request(app)
           .post('/api/capacity/sync')
@@ -939,7 +936,7 @@ describe('Dashboard/server.js - Task Report API Logic', () => {
           onHoldCount: 1
         });
 
-        syncCapacityWithTasks.mockReturnValue({
+        syncCapacityWithTasks.mockResolvedValue({
           success: true,
           after: { '2026-01-25': 5000 },
           diff: 1000,

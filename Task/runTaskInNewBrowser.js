@@ -64,7 +64,7 @@ async function runTaskInNewBrowser({ task }) {
     // Fix #1: ย้าย getBrowser ออกมานอก withTimeout
     // เพื่อให้ finally cleanup ทำงานได้แม้ timeout
     browser = await browserPool.getBrowser();
-    page = await browser.newPage();
+    page = await browserPool.getPage(browser);
 
     // Fix #4: ใช้ TASK_TIMEOUT_MS จาก config
     page.setDefaultTimeout(TASK_TIMEOUT_MS);
@@ -92,7 +92,12 @@ async function runTaskInNewBrowser({ task }) {
     // Fix #1 & #2: Cleanup ทำงานเสมอ แม้ timeout
     // และ capture reference ก่อนใช้งาน
     if (page) {
-      try { await page.close(); } catch {}
+      const pool = browserPool; // capture reference for page release too
+      if (pool) {
+        try { await pool.releasePage(page); } catch {}
+      } else {
+        try { await page.close(); } catch {}
+      }
     }
     if (browser) {
       const pool = browserPool; // Fix #2: capture reference ป้องกัน race condition
@@ -112,6 +117,7 @@ module.exports = runTaskInNewBrowser;
 // exports for main.js
 module.exports.initializeBrowserPool = initializeBrowserPool;
 module.exports.closeBrowserPool = closeBrowserPool;
+module.exports.getBrowserPool = () => browserPool;
 module.exports.getBrowserPoolStatus = () => {
   return browserPool ? browserPool.getStatus() : { status: 'not initialized' };
 };

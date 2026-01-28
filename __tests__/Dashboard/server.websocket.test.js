@@ -42,16 +42,16 @@ jest.mock('../../Task/CapacityTracker', () => ({
   saveDailyOverride: jest.fn(),
   getCapacityMap: jest.fn(() => ({})),
   getOverrideMap: jest.fn(() => ({})),
-  adjustCapacity: jest.fn(),
-  resetCapacityMap: jest.fn(),
-  releaseCapacity: jest.fn(),
+  adjustCapacity: jest.fn().mockResolvedValue(undefined),
+  resetCapacityMap: jest.fn().mockResolvedValue(undefined),
+  releaseCapacity: jest.fn().mockResolvedValue(undefined),
   getRemainingCapacity: jest.fn((date) => 5000),
-  syncCapacityWithTasks: jest.fn(() => ({
+  syncCapacityWithTasks: jest.fn().mockResolvedValue({
     success: true,
     after: { '2026-01-25': 5000 },
     diff: 0,
     deletedOverrides: []
-  }))
+  })
 }));
 
 jest.mock('../../Task/taskReporter', () => ({
