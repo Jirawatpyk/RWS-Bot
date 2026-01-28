@@ -11,16 +11,17 @@ const {
 } = require('./taskReporter');
 const fs = require('fs');
 const { logSuccess, logFail, logInfo } = require('../Logs/logger');
+const { TIMEOUTS, REPORT_SCHEDULE } = require('../Config/constants');
 
 // Constants
-const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const ALERT_CHECK_INTERVAL_MS = 15 * 60 * 1000;
+const ONE_DAY_MS = TIMEOUTS.ONE_DAY;
+const ALERT_CHECK_INTERVAL_MS = TIMEOUTS.ALERT_CHECK_INTERVAL;
 
 // Report schedule times
 const REPORT_TIMES = [
-  { hour: 9, minute: 0, label: '09:00 Report' },
-  { hour: 15, minute: 0, label: '15:00 Report' },
-  { hour: 18, minute: 0, label: '18:00 Report' }
+  { ...REPORT_SCHEDULE.MORNING, label: '09:00 Report' },
+  { ...REPORT_SCHEDULE.AFTERNOON, label: '15:00 Report' },
+  { ...REPORT_SCHEDULE.EVENING, label: '18:00 Report' }
 ];
 
 // Timer tracking for cleanup

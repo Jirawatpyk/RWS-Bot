@@ -11,13 +11,14 @@ const { loadLastSeenUidFromFile, saveLastSeenUid } = require('./uidStore');
 const { loadSeenUids, saveSeenUids } = require('./seenUidsStore');
 const { logInfo, logSuccess, logFail } = require('../Logs/logger');
 const { retry } = require('./retryHandler');
+const { TIMEOUTS, CAPACITY, RETRIES } = require('../Config/constants');
 
-const seenUidsMap = new Map();  
+const seenUidsMap = new Map();
 const lastSeenUidMap = new Map();
 const isFetchingMap = new Map();
 const lastHealthCheckMap = new Map();
-const HEALTH_CHECK_INTERVAL = 180000; // 3 นาที
-const HEALTH_CHECK_TIMEOUT  = 15000;  // 10 วิ
+const HEALTH_CHECK_INTERVAL = TIMEOUTS.IMAP_HEALTH_CHECK_INTERVAL;
+const HEALTH_CHECK_TIMEOUT = TIMEOUTS.IMAP_HEALTH_CHECK_TIMEOUT;
 
 // ===== ✅ 1. Email Content Parser Class (ไม่เปลี่ยน) =====
 class EmailContentParser {
@@ -46,12 +47,12 @@ class EmailContentParser {
   }
 
   extractStatus(content, $) {
-  const domText = $('td:contains("Status")').next().text().trim();
-  if (domText) return domText;
+    const domText = $('td:contains("Status")').next().text().trim();
+    if (domText) return domText;
 
-  const match = content.match(this.patterns.status);
-  return match ? match[1].trim() : null;
-}
+    const match = content.match(this.patterns.status);
+    return match ? match[1].trim() : null;
+  }
 
   extractOrderId(rawText) {
     const match = rawText.match(this.patterns.orderId);
@@ -163,9 +164,9 @@ async function performHealthCheckIfNeeded(client, mailboxName) {
 
 // ===== ✅ 2. Memory Management Helper (ไม่เปลี่ยน) =====
 function trimSeenUids(mailboxName, seenSet) {
-  if (seenSet.size > 1000) {
+  if (seenSet.size > CAPACITY.SEEN_UIDS_LIMIT) {
     const uidArray = Array.from(seenSet).map(Number).sort((a, b) => b - a);
-    const trimmed = new Set(uidArray.slice(0, 1000));
+    const trimmed = new Set(uidArray.slice(0, CAPACITY.SEEN_UIDS_LIMIT));
     logInfo(`🧹 Trimmed seenUids for "${mailboxName}": kept ${trimmed.size} recent UIDs`);
     return trimmed; // ✅ คืนค่า
   }
@@ -187,6 +188,234 @@ async function initLastSeenUid(client, mailboxName) {
   return last;
 }
 
+/**
+ * Searches for new email UIDs starting from the specified UID
+ * @param {ImapClient} client - IMAP client instance
+ * @param {number} startUid - Starting UID for search
+ * @returns {Promise<number[]>} Array of UIDs found
+ */
+async function searchNewEmailUids(client, startUid) {
+  const searchStart = Date.now();
+  try {
+    const uids = await client.search({ uid: `${startUid}:*` });
+    logInfo(`🔍 Search completed: ${uids.length} UIDs (${Date.now() - searchStart}ms)`);
+    return uids;
+  } catch (err) {
+    logFail('❌ Search failed:', {
+      error: err.message,
+      code: err.code,
+      searchRange: `${startUid}:*`,
+      duration: Date.now() - searchStart
+    });
+    throw err;
+  }
+}
+
+/**
+ * Parses email message and extracts task data with receivedDate
+ * @param {Object} message - IMAP message object
+ * @param {EmailContentParser} parser - Email content parser instance
+ * @returns {Promise<Object>} Parsed email data with receivedDate
+ */
+async function parseEmailMessage(message, parser) {
+  const parsed = await simpleParser(message.source);
+  const content = parsed.html || parsed.text || '';
+  const rawText = `${parsed.subject || ''} ${parsed.text || ''} ${parsed.html || ''}`;
+
+  const receivedDate = parsed.date
+    ? dayjs(parsed.date).tz('Asia/Bangkok').format('YYYY-MM-DD h:mm A')
+    : null;
+
+  const emailData = parser.parseEmail(content, rawText);
+
+  return { ...emailData, receivedDate };
+}
+
+/**
+ * Creates payload object for callback from email data
+ * @param {Object} emailData - Parsed email data
+ * @param {string|null} url - Moravia task URL or null
+ * @returns {Object} Payload object
+ */
+function createTaskPayload(emailData, url = null) {
+  return {
+    orderId: emailData.orderId,
+    workflowName: emailData.workflowName,
+    url,
+    amountWords: emailData.metrics.amountWords,
+    plannedEndDate: emailData.metrics.plannedEndDate,
+    status: emailData.status,
+    receivedDate: emailData.receivedDate
+  };
+}
+
+/**
+ * Handles callback invocation for a task with error handling
+ * @param {Function} callback - Callback function to invoke
+ * @param {Object} payload - Task payload
+ * @param {number} uid - Email UID for logging
+ * @param {string} context - Context description for error messages
+ */
+function invokeTaskCallback(callback, payload, uid, context = '') {
+  setImmediate(() => {
+    Promise.resolve(callback?.(payload)).catch(err => {
+      logFail(`❌ Callback failed ${context}for UID ${uid}: ${err.message}`, {
+        orderId: payload.orderId,
+        url: payload.url
+      });
+    });
+  });
+}
+
+/**
+ * Processes email data and triggers callbacks for tasks
+ * Handles both "On Hold" status (no link) and active tasks (with links)
+ * @param {Object} emailData - Parsed email data
+ * @param {number} uid - Email UID
+ * @param {Function} callback - Callback function for task processing
+ */
+function processEmailData(emailData, uid, callback) {
+  logInfo(`📩 UID ${uid} | ${emailData.status} :: [${emailData.orderId}] Words: ${emailData.metrics.amountWords} | Deadline: ${emailData.metrics.plannedEndDate}`);
+
+  const hasLinks = Array.isArray(emailData.moraviaLinks) && emailData.moraviaLinks.length > 0;
+
+  // Handle "On Hold" status without links
+  if (!hasLinks && (emailData.status || '').toLowerCase() === 'on hold') {
+    logInfo(`🟡 ${emailData.status} :: [${emailData.orderId}] Without link`);
+    const payload = createTaskPayload(emailData, null);
+    invokeTaskCallback(callback, payload, uid, '(On Hold) ');
+    return;
+  }
+
+  // Handle tasks with Moravia links
+  if (hasLinks) {
+    for (const link of emailData.moraviaLinks) {
+      logInfo(`✅ ${emailData.status} :: [${emailData.orderId}] Processing Moravia link`);
+      const payload = createTaskPayload(emailData, link);
+      invokeTaskCallback(callback, payload, uid);
+    }
+  }
+}
+
+/**
+ * Processes a single email message
+ * @param {Object} message - IMAP message object
+ * @param {Set} seenSet - Set of already seen UIDs
+ * @param {string} mailboxName - Mailbox name
+ * @param {EmailContentParser} parser - Email parser instance
+ * @param {Function} callback - Callback function
+ * @returns {Promise<boolean>} True if processed, false if skipped
+ */
+async function processSingleEmail(message, seenSet, mailboxName, parser, callback) {
+  const uid = message.uid;
+  const emailStart = Date.now();
+
+  if (seenSet.has(uid)) {
+    logInfo(`⚠️ [${mailboxName}] Skipping duplicate UID: ${uid}`);
+    return false;
+  }
+
+  try {
+    const emailData = await parseEmailMessage(message, parser);
+    processEmailData(emailData, uid, callback);
+
+    logInfo(`⚡ UID ${uid} processed in ${Date.now() - emailStart}ms`);
+    return true;
+  } catch (parseError) {
+    logFail(`❌ Failed to process UID ${uid}:`, {
+      error: parseError.message,
+      subject: message.envelope?.subject,
+      from: message.envelope?.from?.[0]?.address,
+      duration: Date.now() - emailStart
+    });
+    return true; // Still count as processed to prevent reprocessing
+  }
+}
+
+/**
+ * Processes batch of emails and returns processed UIDs
+ * @param {ImapClient} client - IMAP client instance
+ * @param {number[]} uids - Array of UIDs to process
+ * @param {Set} seenSet - Set of already seen UIDs
+ * @param {string} mailboxName - Mailbox name
+ * @param {Function} callback - Callback function
+ * @returns {Promise<number[]>} Array of processed UIDs
+ */
+async function processEmailBatch(client, uids, seenSet, mailboxName, callback) {
+  const parser = new EmailContentParser();
+  const fetchedUids = [];
+  const processingStart = Date.now();
+
+  for await (const message of client.fetch(uids, { uid: true, source: true, envelope: true })) {
+    const processed = await processSingleEmail(message, seenSet, mailboxName, parser, callback);
+    if (processed) {
+      fetchedUids.push(message.uid);
+    }
+  }
+
+  if (fetchedUids.length > 0) {
+    logSuccess(`📌 Batch complete: ${fetchedUids.length} emails processed in ${Date.now() - processingStart}ms`);
+  }
+
+  return fetchedUids;
+}
+
+/**
+ * Updates UID tracking state after processing emails
+ * @param {string} mailboxName - Mailbox name
+ * @param {number[]} fetchedUids - Array of processed UIDs
+ * @param {Set} seenSet - Set of seen UIDs
+ */
+function updateUidTracking(mailboxName, fetchedUids, seenSet) {
+  const maxUid = Math.max(...fetchedUids);
+
+  // Add to seen set
+  fetchedUids.forEach(uid => seenSet.add(uid));
+
+  // Memory management
+  const trimmedSeen = trimSeenUids(mailboxName, seenSet);
+
+  // Save to state
+  seenUidsMap.set(mailboxName, trimmedSeen);
+  saveSeenUids(mailboxName, trimmedSeen);
+  lastSeenUidMap.set(mailboxName, maxUid);
+  saveLastSeenUid(mailboxName, maxUid);
+
+  logInfo(`📌 [${mailboxName}] Updated lastSeenUid → ${maxUid} | SeenUIDs count: ${trimmedSeen.size}`);
+}
+
+/**
+ * Main email processing workflow with mailbox lock
+ * @param {ImapClient} client - IMAP client instance
+ * @param {string} mailboxName - Mailbox name
+ * @param {number} startUid - Starting UID for search
+ * @param {Function} callback - Callback function
+ */
+async function processMailboxWithLock(client, mailboxName, startUid, callback) {
+  const lock = await client.getMailboxLock(mailboxName);
+
+  try {
+    const uids = await searchNewEmailUids(client, startUid);
+
+    if (uids.length === 0) {
+      logInfo(`ℹ️ No new emails found from UID ${startUid}`);
+      return;
+    }
+
+    const first = uids[0], last = uids[uids.length - 1];
+    logInfo(`📨 Processing ${uids.length} new emails (UID ${first}…${last})`);
+
+    const seen = seenUidsMap.get(mailboxName) || new Set();
+    const fetchedUids = await processEmailBatch(client, uids, seen, mailboxName, callback);
+
+    if (fetchedUids.length > 0) {
+      updateUidTracking(mailboxName, fetchedUids, seen);
+    }
+  } finally {
+    lock.release();
+  }
+}
+
 // ===== ✅ 4. Optimized fetchNewEmails =====
 async function fetchNewEmails(client, mailboxName, callback) {
   if (isFetchingMap.get(mailboxName)) {
@@ -200,151 +429,16 @@ async function fetchNewEmails(client, mailboxName, callback) {
   const startUid = lastSeenUid + 1;
 
   try {
-    // ✅ Smart Health Check - เช็คเฉพาะเมื่อจำเป็น
-    await new Promise(r => setTimeout(r, Math.floor(Math.random()*300)));
+    // Smart Health Check - check only when needed
+    await new Promise(r => setTimeout(r, Math.floor(Math.random() * 300)));
     await performHealthCheckIfNeeded(client, mailboxName);
 
-    await retry(async () => {
-      const lock = await client.getMailboxLock(mailboxName);
-      const fetchedUids = [];
-      const parser = new EmailContentParser();
-
-      try {
-        // ✅ Search with better logging
-        let uids = [];
-        const searchStart = Date.now();
-        try {
-          uids = await client.search({ uid: `${startUid}:*` });
-          logInfo(`🔍 Search completed: ${uids.length} UIDs (${Date.now() - searchStart}ms)`);
-        } catch (err) {
-          logFail('❌ Search failed:', {
-            error: err.message,
-            code: err.code,
-            searchRange: `${startUid}:*`,
-            duration: Date.now() - searchStart
-          });
-          throw err;
-        }
-
-        if (uids.length === 0) {
-          logInfo(`ℹ️ No new emails found from UID ${startUid}`);
-          return;
-        }
-
-        if (uids.length) {
-          const first = uids[0], last = uids[uids.length - 1];
-          logInfo(`📨 Processing ${uids.length} new emails (UID ${first}…${last})`);
-        }
-
-        let seen = seenUidsMap.get(mailboxName) || new Set();
-        // ✅ Process emails with performance tracking
-        const processingStart = Date.now();
-        for await (const message of client.fetch(uids, { uid: true, source: true, envelope: true })) {
-          const uid = message.uid;
-          const emailStart = Date.now();
-
-          if (seen.has(uid)) {
-            logInfo(`⚠️ [${mailboxName}] Skipping duplicate UID: ${uid}`);
-            continue;
-          }
-
-          try {
-            // Parse email
-            const parsed = await simpleParser(message.source);
-            const content = parsed.html || parsed.text || '';
-            const rawText = `${parsed.subject || ''} ${parsed.text || ''} ${parsed.html || ''}`;
-
-            // Extract receivedDate from email header and convert to Sheet format (UTC+7)
-            const receivedDate = parsed.date
-              ? dayjs(parsed.date).tz('Asia/Bangkok').format('YYYY-MM-DD h:mm A')
-              : null;
-
-            const emailData = parser.parseEmail(content, rawText);
-            
-            logInfo(`📩 UID ${uid} | ${emailData.status} :: [${emailData.orderId}] Words: ${emailData.metrics.amountWords} | Deadline: ${emailData.metrics.plannedEndDate}`);
-            //logInfo(`🆔 Order: ${emailData.orderId} | Workflow: ${emailData.workflowName}`);
-            //logInfo(`📊 Words: ${emailData.metrics.amountWords} | Deadline: ${emailData.metrics.plannedEndDate}`);
-
-            const hasLinks = Array.isArray(emailData.moraviaLinks) && emailData.moraviaLinks.length > 0;
-
-            if (!hasLinks) {
-            //logInfo(`⚠️ No Moravia links found in UID ${uid}`);
-
-              if ((emailData.status || '').toLowerCase() === 'on hold') {
-                logInfo(`🟡 ${emailData.status} :: [${emailData.orderId}] Without link`);
-                const payload = {
-                  orderId: emailData.orderId,
-                  workflowName: emailData.workflowName,
-                  url: null,
-                  amountWords: emailData.metrics.amountWords,
-                  plannedEndDate: emailData.metrics.plannedEndDate,
-                  status: emailData.status,
-                  receivedDate,
-                };
-                setImmediate(() => {
-                  Promise.resolve(callback?.(payload)).catch(err => {
-                    logFail(`❌ Callback failed (On Hold) for UID ${uid}: ${err.message}`, { orderId: emailData.orderId });
-                  });
-                });
-              }
-            }
-
-            if (hasLinks) {
-              for (const link of emailData.moraviaLinks) {
-                logInfo(`✅ ${emailData.status} :: [${emailData.orderId}] Processing Moravia link`);
-                const payload = {
-                  orderId: emailData.orderId,
-                  workflowName: emailData.workflowName,
-                  url: link,
-                  amountWords: emailData.metrics.amountWords,
-                  plannedEndDate: emailData.metrics.plannedEndDate,
-                  status: emailData.status,
-                  receivedDate
-                };
-                setImmediate(() => {
-                  Promise.resolve(callback?.(payload)).catch(err => {
-                    logFail(`❌ Callback failed for UID ${uid}: ${err.message}`, { link, orderId: emailData.orderId });
-                  });
-                });
-              }
-            }
-
-            fetchedUids.push(uid);
-            logInfo(`⚡ UID ${uid} processed in ${Date.now() - emailStart}ms`);
-
-          } catch (parseError) {
-            logFail(`❌ Failed to process UID ${uid}:`, {
-              error: parseError.message,
-              subject: message.envelope?.subject,
-              from: message.envelope?.from?.[0]?.address,
-              duration: Date.now() - emailStart
-            });
-            fetchedUids.push(uid);
-          }
-        }
-
-        // ✅ Update tracking with better logging
-        if (fetchedUids.length > 0) {
-          const maxUid = Math.max(...fetchedUids);
-          fetchedUids.forEach(uid => seen.add(uid));
-          
-          // Memory management
-          seen = trimSeenUids(mailboxName, seen);
-
-          seenUidsMap.set(mailboxName, seen);
-          saveSeenUids(mailboxName, seen);
-          lastSeenUidMap.set(mailboxName, maxUid);
-          saveLastSeenUid(mailboxName, maxUid);
-          
-          logSuccess(`📌 Batch complete: ${fetchedUids.length} emails processed in ${Date.now() - processingStart}ms`);
-          logInfo(`📌 [${mailboxName}] Updated lastSeenUid → ${maxUid} | SeenUIDs count: ${seen.size}`);
-        }
-
-      } finally {
-        lock.release();
-      }
-    }, 3, 1000); // 3 retries, 1 second delay
-
+    // Process mailbox with retry logic
+    await retry(
+      () => processMailboxWithLock(client, mailboxName, startUid, callback),
+      RETRIES.IMAP_FETCH,
+      RETRIES.IMAP_FETCH_DELAY
+    );
   } catch (err) {
     logFail('❌ Email fetch failed after retry:', {
       error: err.message,

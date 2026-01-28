@@ -17,6 +17,7 @@ const isSameOrBefore = require('dayjs/plugin/isSameOrBefore');
 // IMPORTANT: this module depends on CapacityTracker for allocation
 // getAvailableDates(amountWords, effectiveDeadline, excludeToday)
 const { getAvailableDates } = require('./CapacityTracker');
+const { WORKING_HOURS, CAPACITY } = require('../Config/constants');
 
 // Register plugins locally (keeps this module self-contained)
 dayjs.extend(customParseFormat);
@@ -25,9 +26,9 @@ dayjs.extend(isSameOrBefore);
 /* ========================= Config ========================= */
 // Centralized policy knobs. Keep them simple & overridable from caller if needed.
 const DEFAULT_POLICY = Object.freeze({
-  workStartHour: 10,        // inclusive 09:00
-  workEndHour: 19,         // exclusive 19:00 (i.e., last minute is 18:59)
-  urgentHoursThreshold: 6, // <= 6 hours until deadline == urgent
+  workStartHour: WORKING_HOURS.START_HOUR,
+  workEndHour: WORKING_HOURS.END_HOUR,
+  urgentHoursThreshold: CAPACITY.URGENT_HOURS_THRESHOLD,
   shiftNightDeadline: true // if deadline hour < workStartHour → finish by previous day 23:59
 });
 
@@ -159,6 +160,9 @@ function evaluateTaskAcceptance({ orderId, amountWords, plannedEndDate }, overri
   const rawDeadline = adjustMidnight(parsed);
   const hoursToDeadline = rawDeadline.diff(now, 'hour');
   const urgent = hoursToDeadline <= policy.urgentHoursThreshold;
+  // Check if deadline falls within working hours (intentionally checks deadline, not now).
+  // Business rule: reject urgent tasks whose deadlines are outside working hours
+  // because the team won't be available to complete them in time.
   const inWorkingHours = isWithinWorkingHours(rawDeadline, policy);
 
   // Hard rule: urgent + outside working hours ⇒ reject

@@ -28,8 +28,9 @@ const { recordFailure, resetFailure } = require('./Task/consecutiveFailureTracke
 const { evaluateTaskAcceptance, REASONS } = require('./Task/taskAcceptance');
 
 const { cloneProfiles } = require('./tools/cloneProfile');
+const { RETRIES, EXIT_CODES, TIMEOUTS } = require('./Config/constants');
 
-const MAX_LOGIN_RETRIES = 3;
+const MAX_LOGIN_RETRIES = RETRIES.LOGIN_SESSION;
 let browserHolder = { value: null };
 
 /* ========================= Helpers ========================= */
@@ -61,7 +62,7 @@ function mapRejectReasonToSheetStatus(code) {
 
   if (!loginSuccess) {
     logFail(`❌ [Auto RWS] Login failed after all attempts. Exiting system.`, true);
-    process.exit(1);
+    process.exit(EXIT_CODES.ERROR_EXIT);
   }
 
   // Close the login browser, we will use the pool for real tasks
@@ -82,7 +83,7 @@ function mapRejectReasonToSheetStatus(code) {
     logSuccess(`🟢 Browser pool ready: ${poolStatus.availableBrowsers}/${poolStatus.totalBrowsers} browsers available`);
   } catch (err) {
     logFail(`❌ Failed to initialize browser pool: ${err.message}`, true);
-    process.exit(1);
+    process.exit(EXIT_CODES.ERROR_EXIT);
   }
 
   // Daily quota reset
@@ -267,8 +268,8 @@ process.on('uncaughtException', async (err) => {
     await closeBrowserPool();
   } catch {}
   await cleanupFetcher();
-  await new Promise(res => setTimeout(res, 500));
-  process.exit(1);
+  await new Promise(res => setTimeout(res, TIMEOUTS.MEDIUM_DELAY));
+  process.exit(EXIT_CODES.ERROR_EXIT);
 });
 
 process.on('unhandledRejection', async (reason) => {
@@ -278,8 +279,8 @@ process.on('unhandledRejection', async (reason) => {
     await closeBrowserPool();
   } catch {}
   await cleanupFetcher();
-  await new Promise(res => setTimeout(res, 500));
-  process.exit(1);
+  await new Promise(res => setTimeout(res, TIMEOUTS.MEDIUM_DELAY));
+  process.exit(EXIT_CODES.ERROR_EXIT);
 });
 
 // Graceful shutdown
@@ -292,10 +293,10 @@ process.on('SIGINT', async () => {
     await closeBrowserPool();
     await cleanupFetcher();
     logSuccess('Shutdown completed successfully');
-    process.exit(0);
+    process.exit(EXIT_CODES.NORMAL_EXIT);
   } catch (err) {
     logFail(`Error during shutdown: ${err.message}`);
-    process.exit(1);
+    process.exit(EXIT_CODES.ERROR_EXIT);
   }
 });
 
@@ -305,10 +306,10 @@ process.on('SIGTERM', async () => {
     stopTaskSchedule();
     await closeBrowserPool();
     logSuccess('Shutdown completed successfully');
-    process.exit(0);
+    process.exit(EXIT_CODES.NORMAL_EXIT);
   } catch (err) {
     logFail(`Error during shutdown: ${err.message}`);
-    process.exit(1);
+    process.exit(EXIT_CODES.ERROR_EXIT);
   }
 });
 
@@ -323,7 +324,7 @@ async function restartForLoginExpired(reason = 'LOGIN_EXPIRED') {
     await cleanupFetcher();
   } catch {}
 
-  await new Promise(res => setTimeout(res, 500));
+  await new Promise(res => setTimeout(res, TIMEOUTS.MEDIUM_DELAY));
 
-  process.exit(12);
+  process.exit(EXIT_CODES.LOGIN_EXPIRED);
 }

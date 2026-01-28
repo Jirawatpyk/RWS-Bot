@@ -7,6 +7,7 @@ const isSameOrBefore = require('dayjs/plugin/isSameOrBefore');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
 const isBusinessDay = require('./isBusinessDay');
 const { maxDailyCapacity: MAX_DAILY_CAPACITY } = require('../Config/configs');
+const { CAPACITY } = require('../Config/constants');
 
 dayjs.extend(isSameOrBefore);
 dayjs.extend(customParseFormat);
@@ -78,9 +79,9 @@ function getAvailableDates(requiredWords, deadlineStr, excludeToday = false) {
     (!excludeToday || d !== todayStr)
   );
 
-  businessDates.sort(); 
+  businessDates.sort();
 
-  const isUrgent = businessDates.length < 3;
+  const isUrgent = businessDates.length < CAPACITY.URGENT_DAYS_THRESHOLD;
   const allocationPlan = [];
   let remaining = requiredWords;
 

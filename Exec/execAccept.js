@@ -168,151 +168,245 @@ async function step1_ChangeStatus(page) {
 }
 
 /**
+ * Helper: Waits for element and clicks it with scroll into view
+ * @param {Page} page - Puppeteer page instance
+ * @param {string} selector - CSS selector
+ * @param {Object} options - Wait options
+ * @returns {Promise<void>}
+ */
+async function waitAndClick(page, selector, options = {}) {
+  const { timeout = TIMEOUTS.ELEMENT_WAIT, scrollIntoView = true } = options;
+  await page.waitForSelector(selector, { timeout });
+
+  if (scrollIntoView) {
+    await page.evaluate((sel) => {
+      const el = document.querySelector(sel);
+      if (el) el.scrollIntoView({ block: 'center' });
+    }, selector);
+    await sleep(TIMEOUTS.SHORT_DELAY);
+  }
+
+  await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (el) el.click();
+  }, selector);
+}
+
+/**
+ * Helper: Selects option from Select2 dropdown by text content
+ * @param {Page} page - Puppeteer page instance
+ * @param {string} optionText - Text to match in dropdown options
+ * @returns {Promise<void>}
+ */
+async function selectDropdownOption(page, optionText) {
+  const optionXPath = `//div[contains(@class, 'select2-result-label') and contains(text(), '${optionText}')]`;
+  const option = await page.waitForXPath(optionXPath, { timeout: TIMEOUTS.ELEMENT_WAIT });
+  await option.click();
+  await sleep(TIMEOUTS.ANIMATION_DELAY);
+}
+
+/**
+ * Step 2: Opens the Attachments tab if not already there
+ * @param {Page} page - Puppeteer page instance
+ * @returns {Promise<{success: boolean, reason?: string}>}
+ */
+async function openAttachmentsTab(page) {
+  try {
+    const currentUrl = page.url();
+
+    if (currentUrl.includes('/attachments')) {
+      logInfo('Already in Attachments tab. Skipping STEP 2.');
+      return { success: true };
+    }
+
+    await waitAndClick(page, SELECTORS.ATTACHMENTS_TAB);
+    logSuccess('STEP 2: Attachments tab opened.');
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: `STEP 2 failed: ${err.message}` };
+  }
+}
+
+/**
+ * Step 3: Expands the Source section by clicking chevron icon
+ * @param {Page} page - Puppeteer page instance
+ * @returns {Promise<{success: boolean, reason?: string}>}
+ */
+async function expandSourceSection(page) {
+  try {
+    const sourceChevronXPath = "//div[contains(@class,'grid-row') and .//span[contains(normalize-space(.), 'Source')]]//span[contains(@class,'grid-chevron-icon')]";
+    const maxTries = CONFIG.CHEVRON_MAX_RETRIES;
+    let success = false;
+
+    for (let i = 1; i <= maxTries; i++) {
+      await page.evaluate((offset) => window.scrollBy(0, offset), CONFIG.SCROLL_OFFSET);
+      await sleep(TIMEOUTS.CHEVRON_SCROLL_DELAY);
+
+      try {
+        await page.waitForXPath(sourceChevronXPath, { timeout: TIMEOUTS.CHEVRON_RETRY });
+        const sourceChevron = await page.$x(sourceChevronXPath);
+
+        if (sourceChevron.length > 0) {
+          const className = await page.evaluate(el => el.className, sourceChevron[0]);
+
+          if (className.includes('fa-angle-right')) {
+            logSuccess('STEP 3: Source section is collapsed. Expanding...');
+            await sourceChevron[0].click();
+            await sleep(TIMEOUTS.ANIMATION_DELAY);
+          } else {
+            logSuccess('STEP 3: Source section already expanded.');
+          }
+
+          success = true;
+          break;
+        }
+      } catch (innerErr) {
+        logFail(`STEP 3: Attempt ${i} failed: ${innerErr.message}`);
+      }
+
+      await sleep(TIMEOUTS.MEDIUM_DELAY);
+    }
+
+    if (!success) {
+      throw new Error('Source chevron not found after retries.');
+    }
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: `STEP 3 failed: ${err.message}` };
+  }
+}
+
+/**
+ * Step 4: Clicks file link to trigger licence modal
+ * @param {Page} page - Puppeteer page instance
+ * @returns {Promise<{success: boolean, reason?: string}>}
+ */
+async function triggerLicenceModal(page) {
+  try {
+    const fileLink = await page.waitForSelector(SELECTORS.FILE_LINK, { timeout: TIMEOUTS.ELEMENT_WAIT });
+    await fileLink.evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await sleep(TIMEOUTS.SHORT_DELAY);
+    await page.evaluate(el => el.click(), fileLink);
+    await sleep(TIMEOUTS.FILE_LINK_DELAY);
+
+    logSuccess('STEP 4: File link clicked.');
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: `STEP 4 failed: ${err.message}` };
+  }
+}
+
+/**
+ * Step 5: Selects licence from dropdown and confirms
+ * Handles dynamic Select2 dropdown IDs and "About this build" modal interference
+ * @param {Page} page - Puppeteer page instance
+ * @returns {Promise<{success: boolean, reason?: string}>}
+ */
+async function selectLicenceAndConfirm(page) {
+  try {
+    await page.waitForSelector(SELECTORS.MODAL_CONTENT, { timeout: TIMEOUTS.MODAL_WAIT });
+
+    // Check and dismiss "About this build" modal if present
+    const modalTitle = await page.evaluate(() => {
+      const modal = document.querySelector('.modal-content, .popup-container');
+      const title = modal?.querySelector('.modal-header, .popup-header, h4, h3');
+      return title ? title.textContent.trim() : '';
+    });
+
+    if (modalTitle.includes('About this build')) {
+      await page.evaluate(() => {
+        const closeBtn = document.querySelector('.modal-content .close, .popup-container .close, [data-dismiss="modal"]');
+        if (closeBtn) closeBtn.click();
+      });
+      await sleep(TIMEOUTS.SHORT_DELAY);
+    }
+
+    // Wait for dropdown to be ready
+    await page.waitForSelector('[id^="select2-chosen"]', { timeout: TIMEOUTS.MODAL_WAIT });
+
+    // Find correct dropdown ID (dynamic)
+    const dropdownId = await page.evaluate(() => {
+      const allChosen = document.querySelectorAll('[id^="select2-chosen"]');
+      for (const el of allChosen) {
+        const text = el.textContent.toLowerCase();
+        if (text.includes('licence') || text.includes('license') || text.includes('create or select')) {
+          return el.id;
+        }
+      }
+      return allChosen[0]?.id || null;
+    });
+
+    if (!dropdownId) {
+      throw new Error('Licence dropdown not found');
+    }
+
+    // Click dropdown to open options
+    const licenceDropdown = await page.$(`#${dropdownId}`);
+    await licenceDropdown.click();
+    await sleep(TIMEOUTS.SHORT_DELAY);
+
+    // Select licence option
+    await selectDropdownOption(page, CONFIG.LICENCE_NAME);
+
+    logSuccess('STEP 5: Licence selected.');
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: `STEP 5 failed: ${err.message}` };
+  }
+}
+
+/**
+ * Step 6: Clicks the Set Licence button to confirm selection
+ * @param {Page} page - Puppeteer page instance
+ * @returns {Promise<{success: boolean, reason?: string}>}
+ */
+async function clickSetLicenceButton(page) {
+  try {
+    const setBtn = await page.waitForSelector(SELECTORS.SET_LICENCE_BTN, { timeout: TIMEOUTS.BUTTON_WAIT });
+    await setBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
+    await page.evaluate(el => el.click(), setBtn);
+    await sleep(TIMEOUTS.MEDIUM_DELAY);
+
+    logSuccess('STEP 6: Licence set successfully.');
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: `STEP 6 failed: ${err.message}` };
+  }
+}
+
+/**
  * Step 2-6: Main workflow for setting licence
+ * Orchestrates the complete licence selection workflow
  * @param {Page} page - Puppeteer page instance
  * @returns {Promise<{success: boolean, reason: string}>} Result object
  */
 async function step2to6_Workflow(page) {
   try {
-    const currentUrl = page.url();
-
     logProgress('STEP 2+: Waiting for page to be ready...');
     await waitUntilPageIsReady(page);
 
-    if (!currentUrl.includes('/attachments')) {
-      const selector = SELECTORS.ATTACHMENTS_TAB;
-      try {
-        await page.waitForSelector(selector, { timeout: TIMEOUTS.ELEMENT_WAIT });
-        await page.evaluate((sel) => {
-          const el = document.querySelector(sel);
-          if (el) {
-            el.scrollIntoView({ block: 'center' });
-            el.click();
-          }
-        }, selector);
-        logSuccess('STEP 2: Attachments tab opened.');
-      } catch (err) {
-        return { success: false, reason: `STEP 2 failed: ${err.message}` };
-      }
-    } else {
-      logInfo('Already in Attachments tab. Skipping STEP 2.');
-    }
+    // Step 2: Open Attachments tab
+    const step2Result = await openAttachmentsTab(page);
+    if (!step2Result.success) return step2Result;
 
     await sleep(TIMEOUTS.LONG_DELAY);
-    try {
-      const sourceChevronXPath = "//div[contains(@class,'grid-row') and .//span[contains(normalize-space(.), 'Source')]]//span[contains(@class,'grid-chevron-icon')]";
-      const maxTries = CONFIG.CHEVRON_MAX_RETRIES;
-      let success = false;
 
-      for (let i = 1; i <= maxTries; i++) {
-        await page.evaluate((offset) => window.scrollBy(0, offset), CONFIG.SCROLL_OFFSET);
-        await sleep(TIMEOUTS.CHEVRON_SCROLL_DELAY);
-        try {
-          // ใช้ deprecated APIs เดิมที่ใช้งานได้
-          await page.waitForXPath(sourceChevronXPath, { timeout: TIMEOUTS.CHEVRON_RETRY });
-          const sourceChevron = await page.$x(sourceChevronXPath);
+    // Step 3: Expand Source section
+    const step3Result = await expandSourceSection(page);
+    if (!step3Result.success) return step3Result;
 
-          if (sourceChevron.length > 0) {
-            const className = await page.evaluate(el => el.className, sourceChevron[0]);
+    // Step 4: Trigger licence modal by clicking file link
+    const step4Result = await triggerLicenceModal(page);
+    if (!step4Result.success) return step4Result;
 
-            if (className.includes('fa-angle-right')) {
-              logSuccess('STEP 3: Source section is collapsed. Expanding...');
-              await sourceChevron[0].click();
-              await sleep(TIMEOUTS.ANIMATION_DELAY);
-            } else {
-              logSuccess('STEP 3: Source section already expanded.');
-            }
+    // Step 5: Select licence from dropdown
+    const step5Result = await selectLicenceAndConfirm(page);
+    if (!step5Result.success) return step5Result;
 
-            success = true;
-            break;
-          }
-        } catch (innerErr) {
-          logFail(`STEP 3: Attempt ${i} failed: ${innerErr.message}`);
-        }
-        await sleep(TIMEOUTS.MEDIUM_DELAY);
-      }
-
-      if (!success) {
-        throw new Error('Source chevron not found after retries.');
-      }
-    } catch (err) {
-      return { success: false, reason: `STEP 3 failed: ${err.message}` };
-    }
-
-    try {
-      const fileLink = await page.waitForSelector(SELECTORS.FILE_LINK, { timeout: TIMEOUTS.ELEMENT_WAIT });
-      await fileLink.evaluate(el => el.scrollIntoView({ block: 'center' }));
-      await sleep(TIMEOUTS.SHORT_DELAY);
-      await page.evaluate(el => el.click(), fileLink);
-      await sleep(TIMEOUTS.FILE_LINK_DELAY);
-      logSuccess('STEP 4: File link clicked.');
-    } catch (err) {
-      return { success: false, reason: `STEP 4 failed: ${err.message}` };
-    }
-
-    try {
-      await page.waitForSelector(SELECTORS.MODAL_CONTENT, { timeout: TIMEOUTS.MODAL_WAIT });
-
-      // ตรวจสอบว่าเจอ "About this build" modal หรือไม่ ถ้าเจอให้ปิดก่อน
-      const modalTitle = await page.evaluate(() => {
-        const modal = document.querySelector('.modal-content, .popup-container');
-        const title = modal?.querySelector('.modal-header, .popup-header, h4, h3');
-        return title ? title.textContent.trim() : '';
-      });
-
-      if (modalTitle.includes('About this build')) {
-        await page.evaluate(() => {
-          const closeBtn = document.querySelector('.modal-content .close, .popup-container .close, [data-dismiss="modal"]');
-          if (closeBtn) closeBtn.click();
-        });
-        await sleep(500);
-      }
-
-      // STEP 5.1: คลิก dropdown (dynamic ID)
-      // รอให้ dropdown พร้อม
-      await page.waitForSelector('[id^="select2-chosen"]', { timeout: TIMEOUTS.MODAL_WAIT });
-
-      // หา dropdown ID ที่ถูกต้อง
-      const dropdownId = await page.evaluate(() => {
-        const allChosen = document.querySelectorAll('[id^="select2-chosen"]');
-        for (const el of allChosen) {
-          const text = el.textContent.toLowerCase();
-          if (text.includes('licence') || text.includes('license') || text.includes('create or select')) {
-            return el.id;
-          }
-        }
-        // fallback: เอาตัวแรก
-        return allChosen[0]?.id || null;
-      });
-
-      if (!dropdownId) {
-        throw new Error('Licence dropdown not found');
-      }
-
-      const licenceDropdown = await page.$(`#${dropdownId}`);
-      await licenceDropdown.click();
-      await sleep(500);
-
-      // STEP 5.2: รอและเลือก option
-      const optionXPath = `//div[contains(@class, 'select2-result-label') and contains(text(), '${CONFIG.LICENCE_NAME}')]`;
-      const option = await page.waitForXPath(optionXPath, { timeout: TIMEOUTS.ELEMENT_WAIT });
-      await option.click();
-      await sleep(800);  // รอให้ Select2 update ค่า
-
-      logSuccess('STEP 5: Licence selected.');
-    } catch (err) {
-      return { success: false, reason: `STEP 5 failed: ${err.message}` };
-    }
-
-    try {
-      const setBtn = await page.waitForSelector(SELECTORS.SET_LICENCE_BTN, { timeout: TIMEOUTS.BUTTON_WAIT });
-      await setBtn.evaluate(el => el.scrollIntoView({ block: 'center' }));
-      await page.evaluate(el => el.click(), setBtn);
-      await sleep(1000);  // รอให้ AJAX เสร็จ
-      logSuccess('STEP 6: Licence set successfully.');
-    } catch (err) {
-      return { success: false, reason: `STEP 6 failed: ${err.message}` };
-    }
+    // Step 6: Click Set Licence button
+    const step6Result = await clickSetLicenceButton(page);
+    if (!step6Result.success) return step6Result;
 
     return { success: true, reason: 'Licence set successfully.' };
   } catch (err) {

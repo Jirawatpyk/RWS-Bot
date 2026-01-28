@@ -3,6 +3,7 @@ const puppeteer = require('puppeteer');
 const path = require('path');
 const fs = require('fs');
 const { logSuccess, logFail, logInfo, logProgress } = require('../Logs/logger');
+const { TIMEOUTS } = require('../Config/constants');
 
 class BrowserPool {
   constructor(options = {}) {
@@ -124,7 +125,7 @@ class BrowserPool {
    * Node.js is single-threaded so shift() is atomic within a synchronous block —
    * no mutex needed as long as we don't yield between length check and shift().
    */
-  async getBrowser(timeout = 30000) {
+  async getBrowser(timeout = TIMEOUTS.BROWSER_ACQUIRE) {
     if (!this.isInitialized) {
       await this.initialize();
     }
@@ -138,7 +139,7 @@ class BrowserPool {
       if (Date.now() - startTime > timeout) {
         throw new Error('Timeout waiting for available browser from pool');
       }
-      await new Promise(resolve => setTimeout(resolve, 100));
+      await new Promise(resolve => setTimeout(resolve, TIMEOUTS.BROWSER_POLLING_INTERVAL));
     }
 
     // shift() is synchronous — safe from race conditions in Node.js event loop
@@ -156,7 +157,7 @@ class BrowserPool {
       } catch (err) {
         // Failed to recreate — delay re-add to prevent tight retry loop
         this.busySlots.delete(slot);
-        setTimeout(() => this._makeSlotAvailable(slot), 5000);
+        setTimeout(() => this._makeSlotAvailable(slot), TIMEOUTS.BROWSER_RECREATE_DELAY);
         throw new Error(`Failed to recreate browser slot ${slot}: ${err.message}`);
       }
     }
@@ -223,7 +224,7 @@ class BrowserPool {
   async closeAll() {
     this._closing = true; // Suppress _handleDisconnected auto-recreate
     logProgress('Closing all browsers in pool...');
-    const CLOSE_TIMEOUT = 10000; // 10s per browser
+    const CLOSE_TIMEOUT = TIMEOUTS.BROWSER_CLOSE;
 
     const closePromises = [];
     for (const [slot, browser] of this.browsers) {

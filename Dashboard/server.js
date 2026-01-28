@@ -3,6 +3,9 @@
 const express = require('express');
 const dayjs = require('dayjs');
 const fs = require('fs');
+const http = require("http");
+const path = require('path');
+const WebSocket = require("ws");
 
 async function writeCapacityLog(entry) {
   const logFile = path.join(__dirname, '../public', 'capacityLog.json');
@@ -24,14 +27,10 @@ async function writeCapacityLog(entry) {
     console.error("❌ writeCapacityLog failed:", err.message);
   }
 }
-
-const http = require("http");
-const path = require('path');
-const bodyParser = require('body-parser');
-const WebSocket = require("ws");
 const { getAllStatus } = require("./statusManager/taskStatusStore");
 const { logSuccess, logInfo } = require("../Logs/logger");
 const { pauseImap, resumeImap, isImapPaused } = require("../IMAP/imapClient");
+const { TIMEOUTS } = require('../Config/constants');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -53,7 +52,7 @@ const {
   acceptedTasksPath
 } = require('../Task/taskReporter');
 
-app.use(bodyParser.json());
+app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
 // GET override.json
@@ -65,7 +64,7 @@ app.get('/api/override', (req, res) => {
 // POST override.json
 app.post('/api/override', async (req, res) => {
   const override = req.body;
-  if (!override || typeof override !== 'object') {
+  if (!override || typeof override !== 'object' || Array.isArray(override)) {
     return res.status(400).json({ error: 'Invalid override format' });
   }
   saveDailyOverride(override);
@@ -379,24 +378,28 @@ const interval = setInterval(() => {
     ws.isAlive = false;
     ws.ping();
   });
-}, 30000);
+}, TIMEOUTS.WEBSOCKET_PING_INTERVAL);
 
 wss.on("close", () => clearInterval(interval));
-
-app.use(express.static(path.join(__dirname, "../public")));
 
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "../public/index.html"));
 });
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, '0.0.0.0', () => {
-  logInfo(`✅ WebMonitor listening on http://localhost:${PORT}`);
-});
+const DEFAULT_PORT = 3000;
+const PORT = process.env.PORT || DEFAULT_PORT;
+
+// Don't auto-start server in test environment
+if (process.env.NODE_ENV !== 'test') {
+  server.listen(PORT, '0.0.0.0', () => {
+    logInfo(`✅ WebMonitor listening on http://localhost:${PORT}`);
+  });
+}
 
 module.exports = {
   pushStatusUpdate,
   broadcastToClients,
   server,
-  wss
+  wss,
+  app
 };

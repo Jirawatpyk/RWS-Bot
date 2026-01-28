@@ -314,93 +314,54 @@ describe('execAccept Integration', () => {
 
 ### 1.3 Code Quality
 
-#### [ ] 9. Refactor ฟังก์ชันยาว (>100 lines)
+#### [x] 9. Refactor ฟังก์ชันยาว (>100 lines) ✅ DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** `step2to6_Workflow()` 146 lines, `fetchNewEmails()` 170 lines
 **ไฟล์:** `Exec/execAccept.js`, `IMAP/fetcher.js`
 
-**แนวทางแก้:**
-- แยกออกเป็น sub-functions ตาม Single Responsibility
-- Extract reusable helpers (waitAndClick, selectDropdownOption)
-
-```javascript
-// Before: 146 lines monolith
-async function step2to6_Workflow(page, taskData) {
-  // ... 146 lines ...
-}
-
-// After: decomposed
-async function step2to6_Workflow(page, taskData) {
-  await openAttachmentsTab(page);
-  await expandSourceSection(page);
-  await triggerLicenceModal(page, taskData);
-  await selectLicenceAndConfirm(page);
-}
-
-async function openAttachmentsTab(page) { /* ... */ }
-async function expandSourceSection(page) { /* ... */ }
-// etc.
-```
+**ผลลัพธ์:**
+- `execAccept.js`: แยก step2to6_Workflow เป็น 5 sub-functions + 2 helpers (waitAndClick, selectDropdownOption)
+- `fetcher.js`: แยก fetchNewEmails เป็น 9 sub-functions (searchNewEmailUids, parseEmailMessage, etc.)
+- Magic numbers ทั้งหมดใช้ named constants
+- ผ่าน senior-dev review + code-reviewer
 
 ---
 
-#### [ ] 10. สร้าง Config/constants.js สำหรับ Magic Numbers
+#### [x] 10. สร้าง Config/constants.js สำหรับ Magic Numbers ✅ DONE
 **Priority:** 🔵 Low
 **ปัญหา:** Timeout, retry count, threshold กระจายอยู่คนละไฟล์
 **ไฟล์:** `Config/constants.js` (new)
 
-**แนวทางแก้:**
-```javascript
-// Config/constants.js
-module.exports = {
-  TIMEOUTS: {
-    PAGE_LOAD: 30000,
-    SELECTOR_WAIT: 10000,
-    TASK_EXECUTION: 5 * 60 * 1000,
-    IMAP_HEARTBEAT: 2 * 60 * 1000
-  },
-
-  RETRIES: {
-    BROWSER_ACTION: 3,
-    SHEET_WRITE: 5,
-    IMAP_CONNECT: 10
-  },
-
-  THRESHOLDS: {
-    URGENT_HOURS: 6,
-    MAX_BROWSER_PAGES: 20,
-    IMAP_RECONNECT_ALERT: 3
-  },
-
-  WORKING_HOURS: {
-    START: 10, // 10:00
-    END: 19    // 19:00
-  }
-};
-```
+**ผลลัพธ์:**
+- สร้าง `Config/constants.js` รวม 32+ constants ใน 8 หมวด (TIMEOUTS, RETRIES, CAPACITY, WORKING_HOURS, ALERTS, EXIT_CODES, BROWSER_POOL, REPORT_SCHEDULE)
+- อัพเดท 10 ไฟล์ให้ใช้ constants จากส่วนกลาง
+- เพิ่ม WORD_QUOTA_RESET_HOUR สำหรับ wordQuotaTracker
 
 ---
 
-#### [ ] 11. เพิ่ม Unit Tests สำหรับ Task/isBusinessDay.js
+#### [x] 11. เพิ่ม Unit Tests สำหรับ Task/isBusinessDay.js ✅ DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Coverage 70%, holiday edge cases ไม่ครอบคลุม
-**ไฟล์:** `__tests__/unit/isBusinessDay.test.js`
+**ไฟล์:** `__tests__/Task/isBusinessDay.test.js`
 
-**แนวทางแก้:**
-- Test weekend detection
-- Test holiday calendar integration
-- Test edge cases (weekend + holiday, year boundary)
+**ผลลัพธ์:**
+- 23 → 62 tests, **100% coverage** (statements, branches, functions, lines)
+- เพิ่ม: Year Boundary, Leap Year, Invalid Input, Config Integration, Helper Functions, Consecutive Holidays, Date Formats, Month Boundaries
+- แก้ setTimeout test ให้ใช้ done callback pattern ถูกต้อง
 
 ---
 
-#### [ ] 12. เขียน Tests สำหรับ Dashboard API
+#### [x] 12. เขียน Tests สำหรับ Dashboard API ✅ DONE
 **Priority:** 🟡 Medium
 **ปัญหา:** Coverage 0%, API + WebSocket ไม่มี tests
-**ไฟล์:** `__tests__/integration/dashboard.test.js` (new)
+**ไฟล์:** `__tests__/Dashboard/server.test.js`, `__tests__/Dashboard/server.websocket.test.js` (new)
 
-**แนวทางแก้:**
-- ใช้ `supertest` สำหรับ HTTP API
-- ใช้ `socket.io-client` สำหรับ WebSocket tests
+**ผลลัพธ์:**
+- สร้าง HTTP API tests (24 cases) + WebSocket tests (15 cases) ด้วย supertest + ws
+- เพิ่ม NODE_ENV guard ใน server.js, export app สำหรับ testing
+- เปลี่ยน bodyParser เป็น express.json() (built-in)
+- Integration tests ยัง skip อยู่เนื่องจาก fs mock + express.static conflict (TODO)
+- ย้าย requires ขึ้นด้านบนไฟล์ server.js ตาม senior-dev review
 
 ---
 
@@ -954,11 +915,12 @@ await auditLogger.logAction('CAPACITY_OVERRIDE', req.user, { date: '2026-01-30',
 
 | Phase | Started | Completed | Progress |
 |-------|---------|-----------|----------|
-| Phase 1: Quick Wins | - | - | 0/12 |
+| Phase 1: Quick Wins | 2026-01-28 | - | 4/12 (Section 1.3 done) |
 | Phase 2: Medium Term | - | - | 0/10 |
 | Phase 3: Long Term | - | - | 0/8 |
 
 **Last Updated:** 2026-01-28
+**Section 1.3 Completed:** 2026-01-28 (Tasks 9-12, reviewed by code-reviewer + senior-dev)
 **Next Review:** 2026-02-28
 
 ---

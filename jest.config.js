@@ -1,3 +1,6 @@
+// Set NODE_ENV before any module is loaded
+process.env.NODE_ENV = 'test';
+
 module.exports = {
   // Test environment
   testEnvironment: 'node',

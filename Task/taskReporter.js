@@ -5,6 +5,7 @@ const dayjs = require('dayjs');
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 const axios = require('axios');
 const { logSuccess, logFail, logInfo, logProgress } = require('../Logs/logger');
+const { WORKING_HOURS, ALERTS, TIMEOUTS } = require('../Config/constants');
 
 const { jobLinks } = require('../Config/configs');
 const TRACKING_SHEET_ID = process.env.SHEET_ID_Tracking;
@@ -225,12 +226,11 @@ function summarizeTasks(tasks) {
   const now = dayjs();
   const today = now.startOf('day');
   const tomorrow = today.add(1, 'day');
-  const WORK_START_HOUR = 10;
 
   // Apply night deadline shift: if deadline before work start hour, count as previous day
   const parsed = tasks.map(task => {
     let due = dayjs(task.plannedEndDate);
-    if (due.hour() < WORK_START_HOUR) {
+    if (due.hour() < WORKING_HOURS.START_HOUR) {
       due = due.subtract(1, 'day');
     }
     return { ...task, due };
@@ -241,7 +241,7 @@ function summarizeTasks(tasks) {
   const afterTasks = parsed.filter(t => t.due.isAfter(tomorrow, 'day'));
   const alerts = parsed.filter(t => {
     const diffMinutes = dayjs(t.plannedEndDate).diff(now, 'minute');
-    return diffMinutes > 0 && diffMinutes <= 15;
+    return diffMinutes > 0 && diffMinutes <= ALERTS.DUE_WITHIN_MINUTES;
   });
 
   const sumWords = list => list.reduce((sum, t) => sum + (t.amountWords || 0), 0);
@@ -291,7 +291,7 @@ async function sendToGoogleChat(text) {
     return;
   }
   try {
-    await axios.post(CHAT_WEBHOOK, { text }, { timeout: 10000 });
+    await axios.post(CHAT_WEBHOOK, { text }, { timeout: TIMEOUTS.HTTP_REQUEST_TIMEOUT });
   } catch (err) {
     logFail(`[sendToGoogleChat] Failed: ${err.message}`);
   }

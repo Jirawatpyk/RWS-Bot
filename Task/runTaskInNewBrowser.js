@@ -2,9 +2,10 @@
 const BrowserPool = require('../BrowserPool/browserPool');
 const execAccept = require('../Exec/execAccept');
 const withTimeout = require('../Utils/taskTimeout');
+const { TIMEOUTS } = require('../Config/constants');
 
-// Config: ใช้จาก env หรือ default 60 วินาที
-const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS, 10) || 60000;
+// Config: ใช้จาก env หรือ default from constants
+const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS, 10) || TIMEOUTS.TASK_EXECUTION;
 
 // singleton browser pool
 let browserPool = null;

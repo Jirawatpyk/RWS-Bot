@@ -1,21 +1,23 @@
 const path = require('path');
 const fs = require('fs');
 const { logInfo, logFail, logProgress } = require('../Logs/logger');
+const { CAPACITY, RETRIES, TIMEOUTS } = require('../Config/constants');
 
 const QUOTA_FILE = path.join(__dirname, 'wordQuota.json');
-const LIMIT = 8000;
-const STEP = 2000;
+const LIMIT = CAPACITY.WORD_QUOTA_LIMIT;
+const STEP = CAPACITY.WORD_QUOTA_STEP;
+const RESET_HOUR = CAPACITY.WORD_QUOTA_RESET_HOUR;
 
 function getTimeWindowKey() {
   const now = new Date();
   const hour = now.getHours();
-  if (hour < 18) {
+  if (hour < RESET_HOUR) {
     now.setDate(now.getDate() - 1);
   }
   const y = now.getFullYear();
   const m = String(now.getMonth() + 1).padStart(2, '0');
   const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}-18h`;
+  return `${y}-${m}-${d}-${RESET_HOUR}h`;
 }
 
 function loadQuota() {
@@ -28,7 +30,7 @@ function loadQuota() {
 
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function saveQuota(data, retries = 3) {
+async function saveQuota(data, retries = RETRIES.FILE_WRITE) {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
       fs.writeFileSync(QUOTA_FILE, JSON.stringify(data, null, 2));
@@ -39,7 +41,7 @@ async function saveQuota(data, retries = 3) {
         return false;
       }
       // รอสักครู่แล้ว retry (file อาจถูก lock ชั่วคราว)
-      await delay(attempt * 100);
+      await delay(attempt * TIMEOUTS.SHORT_DELAY);
     }
   }
 }
@@ -75,7 +77,7 @@ async function resetIfNewDay() {
   const currentKey = getTimeWindowKey();
 
   Object.keys(data).forEach(key => {
-    if (key.endsWith('-18h') && key !== currentKey) {
+    if (key.endsWith(`-${RESET_HOUR}h`) && key !== currentKey) {
       delete data[key];
       delete data[`${key}_alertedSteps`];
     }
