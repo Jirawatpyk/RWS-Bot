@@ -111,25 +111,42 @@ class CapacityLearner {
         totalDays: 0,
         avgDailyWords: 0,
         avgUtilization: 0,
+        confidence: 0,
+        trend: 'stable',
         peakDay: null,
+        slowDay: null,
+        dailyBreakdown: [],
         suggestions: {},
       };
     }
 
     // Calculate per-day utilization and collect suggestions
     const suggestions = {};
+    const dailyBreakdown = [];
     let totalWords = 0;
     let totalUtilization = 0;
     let peakDay = null;
+    let slowDay = null;
 
     for (const [date, stats] of Object.entries(dailyStats)) {
       totalWords += stats.allocated;
       const utilization = stats.allocated / currentMax;
       totalUtilization += utilization;
 
+      dailyBreakdown.push({
+        date,
+        words: stats.allocated,
+        count: stats.count,
+        utilization: Math.round(utilization * 100),
+      });
+
       // Track peak day
       if (!peakDay || stats.allocated > peakDay.allocated) {
         peakDay = { date, allocated: stats.allocated, count: stats.count, utilization };
+      }
+      // Track slow day
+      if (!slowDay || stats.allocated < slowDay.allocated) {
+        slowDay = { date, allocated: stats.allocated, count: stats.count, utilization };
       }
 
       // Generate suggestion based on utilization
@@ -150,15 +167,38 @@ class CapacityLearner {
       }
     }
 
+    // Sort daily breakdown by date
+    dailyBreakdown.sort((a, b) => a.date.localeCompare(b.date));
+
     const avgDailyWords = Math.round(totalWords / totalDays);
     const avgUtilization = Math.round((totalUtilization / totalDays) * 100);
+
+    // Compute trend: compare first half vs second half of data
+    let trend = 'stable';
+    if (dailyBreakdown.length >= 4) {
+      const mid = Math.floor(dailyBreakdown.length / 2);
+      const firstHalf = dailyBreakdown.slice(0, mid);
+      const secondHalf = dailyBreakdown.slice(mid);
+      const avgFirst = firstHalf.reduce((s, d) => s + d.words, 0) / firstHalf.length;
+      const avgSecond = secondHalf.reduce((s, d) => s + d.words, 0) / secondHalf.length;
+      const changeRatio = avgFirst > 0 ? (avgSecond - avgFirst) / avgFirst : 0;
+      if (changeRatio > 0.1) trend = 'up';
+      else if (changeRatio < -0.1) trend = 'down';
+    }
+
+    // Confidence based on data volume (0-100)
+    const confidence = Math.min(100, Math.round((totalDays / days) * 100));
 
     return {
       period: days,
       totalDays,
       avgDailyWords,
       avgUtilization,
+      confidence,
+      trend,
       peakDay,
+      slowDay,
+      dailyBreakdown,
       suggestions,
     };
   }

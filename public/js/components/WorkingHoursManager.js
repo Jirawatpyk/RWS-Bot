@@ -56,10 +56,13 @@ class WorkingHoursManager {
     if (!this.container) return;
 
     const wh = store.get('workingHours') || {};
-    const schedule = wh.schedule || wh;
-    const startTime = schedule.startTime || schedule.start || '10:00';
-    const endTime = schedule.endTime || schedule.end || '19:00';
-    const isWorkingDay = schedule.isWorkingDay !== false;
+    // API returns { defaultHours: { start, end }, todayHours, isWorkingToday, ... }
+    const todayHours = wh.todayHours || wh.defaultHours || wh.schedule || wh;
+    const startNum = todayHours.start || todayHours.startTime || 10;
+    const endNum = todayHours.end || todayHours.endTime || 19;
+    const startTime = typeof startNum === 'number' ? `${startNum}:00` : startNum;
+    const endTime = typeof endNum === 'number' ? `${endNum}:00` : endNum;
+    const isWorkingDay = wh.isWorkingToday !== undefined ? wh.isWorkingToday : (wh.isWorkingDay !== false);
 
     this.container.innerHTML = `
       <div class="wh-manager">
@@ -164,14 +167,28 @@ class WorkingHoursManager {
 
   _holidaysView() {
     const data = store.get('holidays') || {};
-    const list = data.holidays || data || [];
-    const holidayArr = Array.isArray(list) ? list : [];
+    // API returns { extraHolidays: string[], workingHolidays: string[] }
+    // or possibly { holidays: [...] } array of objects
+    let holidayArr = [];
+    if (Array.isArray(data.holidays)) {
+      holidayArr = data.holidays;
+    } else if (Array.isArray(data.extraHolidays)) {
+      const workingSet = new Set(data.workingHolidays || []);
+      holidayArr = data.extraHolidays.map(d => ({
+        date: d,
+        name: 'Company Holiday',
+        type: 'company',
+        isWorking: workingSet.has(d),
+      }));
+    } else if (Array.isArray(data)) {
+      holidayArr = data;
+    }
 
     const rows = holidayArr.map(h => {
-      const date = h.date || '';
-      const name = h.name || h.description || 'Holiday';
-      const type = h.type || 'public';
-      const isWorking = h.isWorkingDay || h.isWorking || false;
+      const date = typeof h === 'string' ? h : (h.date || '');
+      const name = (typeof h === 'object' && h.name) ? h.name : 'Holiday';
+      const type = (typeof h === 'object' && h.type) ? h.type : 'company';
+      const isWorking = (typeof h === 'object') ? (h.isWorkingDay || h.isWorking || false) : false;
       const badgeClass = type === 'company' ? 'badge-warning' : 'badge-error';
 
       const safeName = escapeHtml(name);
@@ -213,13 +230,28 @@ class WorkingHoursManager {
 
   _overtimeView() {
     const data = store.get('overtime') || {};
-    const list = data.schedules || data.overtime || [];
-    const otArr = Array.isArray(list) ? list : Object.entries(list).map(([date, info]) => ({ date, ...info }));
+    // API returns { "2026-01-30": { start: 19, end: 22 }, ... } flat object
+    // or { schedules: [...] } or { overtime: [...] }
+    let otArr = [];
+    if (Array.isArray(data.schedules)) {
+      otArr = data.schedules;
+    } else if (Array.isArray(data.overtime)) {
+      otArr = data.overtime;
+    } else if (Array.isArray(data)) {
+      otArr = data;
+    } else {
+      // Flat object: keys are dates, values are { start, end }
+      otArr = Object.entries(data)
+        .filter(([, v]) => v && typeof v === 'object' && ('start' in v || 'end' in v))
+        .map(([date, info]) => ({ date, ...info }));
+    }
 
     const rows = otArr.map(ot => {
       const date = ot.date || '';
-      const start = ot.startTime || ot.start || '';
-      const end = ot.endTime || ot.end || '';
+      const startRaw = ot.startTime || ot.start || '';
+      const endRaw = ot.endTime || ot.end || '';
+      const start = typeof startRaw === 'number' ? `${startRaw}:00` : startRaw;
+      const end = typeof endRaw === 'number' ? `${endRaw}:00` : endRaw;
 
       return `
         <tr>
@@ -252,15 +284,25 @@ class WorkingHoursManager {
 
   _getHolidaysMap() {
     const data = store.get('holidays') || {};
+    const map = {};
+    // Handle { extraHolidays: string[], workingHolidays: string[] }
+    if (Array.isArray(data.extraHolidays)) {
+      const workingSet = new Set(data.workingHolidays || []);
+      for (const d of data.extraHolidays) {
+        map[d] = { name: 'Company Holiday', type: 'company', isWorking: workingSet.has(d) };
+      }
+      return map;
+    }
+    // Handle { holidays: [{ date, name, type, ... }] }
     const list = data.holidays || data || [];
     const arr = Array.isArray(list) ? list : [];
-    const map = {};
     for (const h of arr) {
-      if (h.date) {
-        map[h.date] = {
-          name: h.name || h.description || 'Holiday',
-          type: h.type || 'public',
-          isWorking: h.isWorkingDay || h.isWorking || false,
+      const date = typeof h === 'string' ? h : h.date;
+      if (date) {
+        map[date] = {
+          name: (typeof h === 'object' && h.name) || 'Holiday',
+          type: (typeof h === 'object' && h.type) || 'public',
+          isWorking: (typeof h === 'object') ? (h.isWorkingDay || h.isWorking || false) : false,
         };
       }
     }
@@ -269,15 +311,19 @@ class WorkingHoursManager {
 
   _getOvertimeMap() {
     const data = store.get('overtime') || {};
-    const list = data.schedules || data.overtime || [];
     const map = {};
+    // Handle array formats
+    const list = data.schedules || data.overtime;
     if (Array.isArray(list)) {
       for (const ot of list) {
         if (ot.date) map[ot.date] = true;
       }
-    } else if (typeof list === 'object') {
-      for (const date of Object.keys(list)) {
-        map[date] = true;
+      return map;
+    }
+    // Handle flat object: { "2026-01-30": { start, end }, ... }
+    for (const [key, val] of Object.entries(data)) {
+      if (val && typeof val === 'object' && ('start' in val || 'end' in val)) {
+        map[key] = true;
       }
     }
     return map;
@@ -375,7 +421,10 @@ class WorkingHoursManager {
         return;
       }
       try {
-        await api.post('/api/working-hours/overtime', { date, startTime, endTime });
+        // Backend expects { date, start: number, end: number }
+        const start = parseInt(startTime.split(':')[0], 10);
+        const end = parseInt(endTime.split(':')[0], 10);
+        await api.post('/api/working-hours/overtime', { date, start, end });
         document.dispatchEvent(new CustomEvent('toast:show', {
           detail: { type: 'success', message: 'Overtime scheduled' }
         }));

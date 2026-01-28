@@ -60,7 +60,9 @@ class QueueMonitor {
   render() {
     if (!this.container) return;
 
-    const status = store.get('queueStatus') || {};
+    const rawStatus = store.get('queueStatus') || {};
+    // API may wrap in { persistent: {...} } or return flat
+    const status = rawStatus.persistent || rawStatus;
     const recentData = store.get('queueRecent') || {};
     const tasks = recentData.tasks || recentData || [];
     const taskArr = Array.isArray(tasks) ? tasks : [];
@@ -145,8 +147,8 @@ class QueueMonitor {
 
   _taskRow(task) {
     const id = task.id || task.rowid || '-';
-    const meta = task.taskMeta || task.meta || {};
-    const workflow = typeof meta === 'string' ? meta : (meta.workflowName || meta.orderId || meta.workflow || '-');
+    const meta = task.taskMeta || task.taskData || task.meta || {};
+    const workflow = typeof meta === 'string' ? meta : (meta.workflowName || meta.orderId || meta.workflow || meta.taskLink || '-');
     const status = task.status || 'unknown';
     const created = task.createdAt ? dayjs(task.createdAt).format('DD/MM HH:mm') : '-';
     const error = task.error || '';

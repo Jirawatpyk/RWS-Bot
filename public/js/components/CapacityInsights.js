@@ -55,13 +55,26 @@ class CapacityInsights {
 
     const recommendation = summary.recommendation || analysis.recommendation || 'No data';
     const confidence = summary.confidence || analysis.confidence || 0;
-    const avgWords = analysis.avgWordsPerDay || analysis.averageDaily || 0;
+    // API returns avgDailyWords (not avgWordsPerDay)
+    const avgWords = analysis.avgWordsPerDay || analysis.avgDailyWords || analysis.averageDaily || 0;
     const trend = analysis.trend || analysis.trendDirection || 'stable';
-    const peakDay = analysis.peakDay || '-';
-    const slowDay = analysis.slowDay || '-';
+    // peakDay may be an object { date, allocated, count, utilization } or a string
+    const peakDayRaw = analysis.peakDay || '-';
+    const peakDay = (peakDayRaw && typeof peakDayRaw === 'object') ? (peakDayRaw.date || '-') : peakDayRaw;
+    const slowDayRaw = analysis.slowDay || '-';
+    const slowDay = (slowDayRaw && typeof slowDayRaw === 'object') ? (slowDayRaw.date || '-') : slowDayRaw;
 
-    const suggestionList = suggestions.suggestions || suggestions.items || [];
-    const suggArr = Array.isArray(suggestionList) ? suggestionList : [];
+    // suggestions may be object { "date": { current, suggested, reason } } or array
+    const rawSuggestions = suggestions.suggestions || suggestions.items || {};
+    let suggArr = [];
+    if (Array.isArray(rawSuggestions)) {
+      suggArr = rawSuggestions;
+    } else if (typeof rawSuggestions === 'object') {
+      suggArr = Object.entries(rawSuggestions).map(([date, info]) => ({
+        message: `${date}: ${info.current}→${info.suggested} words (${info.reason || ''})`,
+        priority: info.utilization > 90 ? 'high' : info.utilization < 50 ? 'low' : 'medium',
+      }));
+    }
 
     const trendIcon = trend === 'up' ? '&#9650;' : trend === 'down' ? '&#9660;' : '&#8594;';
     const trendClass = trend === 'up' ? 'text-success' : trend === 'down' ? 'text-error' : 'text-muted';

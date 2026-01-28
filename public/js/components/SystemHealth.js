@@ -137,7 +137,8 @@ class SystemHealth {
     const conn = d.connection || d;
     const health = d.health || {};
     const connected = conn.connected || conn.totalConnections > 0 || false;
-    const mailboxes = conn.mailboxes || conn.mailboxCount || 0;
+    const rawMailboxes = conn.mailboxes || conn.mailboxCount || 0;
+    const mailboxes = Array.isArray(rawMailboxes) ? rawMailboxes.length : rawMailboxes;
     const reconnects = conn.totalReconnects || health.totalReconnectsTracked || 0;
     const paused = conn.isPaused || false;
     const statusClass = paused ? 'connecting' : (connected ? 'online' : 'offline');
@@ -257,7 +258,7 @@ class SystemHealth {
 
   _syncSection(data) {
     const d = data || {};
-    const lastSync = d.lastSyncTime || d.lastSync;
+    const lastSync = d.lastSyncTime || d.lastSync || d.timestamp;
     const isRunning = d.isRunning || d.isSyncing || false;
     const lastSyncText = lastSync ? dayjs(lastSync).format('HH:mm:ss') : '--:--:--';
 
@@ -283,8 +284,11 @@ class SystemHealth {
 
   _verificationSection(data) {
     const d = data || {};
-    const pending = d.pendingCount || d.queueLength || 0;
-    const results = d.recentResults || d.results || [];
+    const pending = d.pendingCount || d.queueLength || d.pending || 0;
+    const rawResults = d.recentResults || d.results || [];
+    // API may return lastVerification (single object) instead of array
+    const results = Array.isArray(rawResults) ? rawResults : [];
+    const completed = d.completed || results.length;
     const passCount = results.filter(r => r.verified === true || r.status === 'passed').length;
     const failCount = results.filter(r => r.verified === false || r.status === 'failed').length;
 
@@ -311,7 +315,7 @@ class SystemHealth {
     const el = document.getElementById('sync-section');
     if (!el) return;
     const sync = store.get('syncStatus') || {};
-    const lastSync = sync.lastSyncTime || sync.lastSync;
+    const lastSync = sync.lastSyncTime || sync.lastSync || sync.timestamp;
     const isRunning = sync.isRunning || sync.isSyncing || false;
     const timeEl = document.getElementById('sync-last-time');
     if (timeEl && lastSync) timeEl.textContent = dayjs(lastSync).format('HH:mm:ss');
@@ -328,8 +332,9 @@ class SystemHealth {
     const el = document.getElementById('verification-section');
     if (!el) return;
     const data = store.get('verificationStatus') || {};
-    const pending = data.pendingCount || data.queueLength || 0;
-    const results = data.recentResults || data.results || [];
+    const pending = data.pendingCount || data.queueLength || data.pending || 0;
+    const rawResults = data.recentResults || data.results || [];
+    const results = Array.isArray(rawResults) ? rawResults : [];
     const passCount = results.filter(r => r.verified === true || r.status === 'passed').length;
     const failCount = results.filter(r => r.verified === false || r.status === 'failed').length;
 
