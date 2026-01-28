@@ -12,6 +12,7 @@ const { loadSeenUids, saveSeenUids } = require('./seenUidsStore');
 const { logInfo, logSuccess, logFail } = require('../Logs/logger');
 const { retry } = require('./retryHandler');
 const { TIMEOUTS, CAPACITY, RETRIES } = require('../Config/constants');
+const { I18nEmailParser } = require('./i18nParser');
 
 // Health monitor instance - set externally via setHealthMonitor()
 let healthMonitor = null;
@@ -23,10 +24,13 @@ const lastHealthCheckMap = new Map();
 const HEALTH_CHECK_INTERVAL = TIMEOUTS.IMAP_HEALTH_CHECK_INTERVAL;
 const HEALTH_CHECK_TIMEOUT = TIMEOUTS.IMAP_HEALTH_CHECK_TIMEOUT;
 
-// ===== ✅ 1. Email Content Parser Class (ไม่เปลี่ยน) =====
+// ===== 1. Email Content Parser Class (i18n-aware) =====
+// Singleton I18nEmailParser instance shared across all EmailContentParser instances
+const i18nParser = new I18nEmailParser();
+
 class EmailContentParser {
   constructor() {
-    // Pre-compiled regex patterns
+    // Default English patterns (used as fallback and for backward compatibility)
     this.patterns = {
       orderId: /\[#(\d+)\]/,
       amountWords: /amountWords\s*[:：]?\s*['"]?([0-9.,]+)/i,
@@ -34,50 +38,96 @@ class EmailContentParser {
       moraviaLinks: /https:\/\/projects\.moravia\.com\/Task\/[^\s<>"']*\/detail\/notification\?command=Accept/g,
       status: /Status\s*[:：]?\s*['"]?([A-Za-z ]+)['"]?/i
     };
+    this.i18n = i18nParser;
   }
 
-  parseEmail(content, rawText) {
+  parseEmail(content, rawText, headers = {}) {
+    // Detect language from content and headers
+    const detectedLanguage = this.i18n.detectLanguage(content, headers);
+    const langPatterns = this.i18n.getPatternsForLanguage(detectedLanguage);
+
+    // Use detected language patterns (falls back to English automatically)
+    const activePatterns = {
+      ...this.patterns,
+      status: langPatterns.status,
+      amountWords: langPatterns.amountWords,
+      plannedEndDate: langPatterns.plannedEndDate,
+      orderId: langPatterns.orderId,
+      moraviaLinks: langPatterns.moraviaLinks
+    };
+
+    // Get DOM labels for the detected language
+    const domLabels = langPatterns.domLabels || this.i18n.getPatternsForLanguage('en').domLabels;
+
     // Single cheerio instance per email
     const $ = cheerio.load(content);
-    
+
     return {
-      status: this.extractStatus(content, $),
-      orderId: this.extractOrderId(rawText),
-      workflowName: this.extractWorkflowName($),
-      metrics: this.extractMetrics(content, $),
-      moraviaLinks: this.extractMoraviaLinks(content)
+      status: this.extractStatus(content, $, activePatterns, domLabels),
+      orderId: this.extractOrderId(rawText, activePatterns),
+      workflowName: this.extractWorkflowName($, domLabels),
+      metrics: this.extractMetrics(content, $, activePatterns, domLabels),
+      moraviaLinks: this.extractMoraviaLinks(content, activePatterns),
+      detectedLanguage
     };
   }
 
-  extractStatus(content, $) {
-    const domText = $('td:contains("Status")').next().text().trim();
+  extractStatus(content, $, patterns, domLabels) {
+    // Use resolved patterns and labels, or fall back to defaults
+    const p = patterns || this.patterns;
+    const labels = domLabels || { status: 'Status' };
+
+    const domText = $(`td:contains("${labels.status}")`).next().text().trim();
     if (domText) return domText;
 
-    const match = content.match(this.patterns.status);
+    const match = content.match(p.status);
     return match ? match[1].trim() : null;
   }
 
-  extractOrderId(rawText) {
-    const match = rawText.match(this.patterns.orderId);
+  extractOrderId(rawText, patterns) {
+    const p = patterns || this.patterns;
+    const match = rawText.match(p.orderId);
     return match ? match[1] : null;
   }
 
-  extractWorkflowName($) {
-    return $('td:contains("Workflow name")').next().text().trim() || null;
+  extractWorkflowName($, domLabels) {
+    const labels = domLabels || { workflowName: 'Workflow name' };
+    // Try localized label first, then fall back to English
+    const localizedText = $(`td:contains("${labels.workflowName}")`).next().text().trim();
+    if (localizedText) return localizedText;
+
+    // English fallback (in case email mixes languages)
+    if (labels.workflowName !== 'Workflow name') {
+      const englishText = $('td:contains("Workflow name")').next().text().trim();
+      if (englishText) return englishText;
+    }
+
+    return null;
   }
 
-  extractMetrics(content, $) {
-    // Try structured data first
-    let amountsText = $('td:contains("Amounts")').next().text();
-    let deadlineText = $('td:contains("Planned end")').next().text();
+  extractMetrics(content, $, patterns, domLabels) {
+    const p = patterns || this.patterns;
+    const labels = domLabels || { amounts: 'Amounts', plannedEnd: 'Planned end' };
+
+    // Try structured data first (localized labels)
+    let amountsText = $(`td:contains("${labels.amounts}")`).next().text();
+    let deadlineText = $(`td:contains("${labels.plannedEnd}")`).next().text();
+
+    // Try English labels as fallback if localized labels found nothing
+    if (!amountsText && labels.amounts !== 'Amounts') {
+      amountsText = $('td:contains("Amounts")').next().text();
+    }
+    if (!deadlineText && labels.plannedEnd !== 'Planned end') {
+      deadlineText = $('td:contains("Planned end")').next().text();
+    }
 
     // Fallback to regex
     if (!amountsText) {
-      const match = content.match(this.patterns.amountWords);
+      const match = content.match(p.amountWords);
       amountsText = match ? match[1] : null;
     }
     if (!deadlineText) {
-      const match = content.match(this.patterns.plannedEndDate);
+      const match = content.match(p.plannedEndDate);
       deadlineText = match ? match[1] : null;
     }
 
@@ -87,8 +137,9 @@ class EmailContentParser {
     };
   }
 
-  extractMoraviaLinks(content) {
-    return [...(content.match(this.patterns.moraviaLinks) || [])];
+  extractMoraviaLinks(content, patterns) {
+    const p = patterns || this.patterns;
+    return [...(content.match(p.moraviaLinks) || [])];
   }
 
   normalizeDate(dateText) {
@@ -242,7 +293,14 @@ async function parseEmailMessage(message, parser) {
     ? dayjs(parsed.date).tz('Asia/Bangkok').format('YYYY-MM-DD h:mm A')
     : null;
 
-  const emailData = parser.parseEmail(content, rawText);
+  // Build headers object for language detection
+  const headers = {};
+  if (parsed.headers) {
+    const contentLang = parsed.headers.get('content-language');
+    if (contentLang) headers.contentLanguage = contentLang;
+  }
+
+  const emailData = parser.parseEmail(content, rawText, headers);
 
   return { ...emailData, receivedDate };
 }
@@ -509,5 +567,6 @@ module.exports = {
   cleanupFetcher,
   forceHealthCheck, // Export for debugging
   setHealthMonitor, // Inject health monitor instance
-  EmailContentParser
+  EmailContentParser,
+  i18nParser // Expose singleton for external language registration
 };

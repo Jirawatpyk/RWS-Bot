@@ -440,6 +440,15 @@ class BrowserPool {
     }
   }
 
+  /**
+   * Get the browsers Map for external consumers (e.g., HealthMonitor).
+   * Returns a read-only view — callers should not modify the Map directly.
+   * @returns {Map<number, import('puppeteer').Browser>}
+   */
+  getBrowsers() {
+    return this.browsers;
+  }
+
   getStatus() {
     return {
       poolSize: this.poolSize,

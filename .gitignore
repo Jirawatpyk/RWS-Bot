@@ -17,7 +17,8 @@ user_data/
 Logs/
 *.log
 
-# Runtime JSON data
+# Runtime data (SQLite, JSON)
+data/
 Task/acceptedTasks.json
 Task/wordQuota.json
 IMAP/seenUids_*.json

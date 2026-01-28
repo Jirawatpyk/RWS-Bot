@@ -12,7 +12,15 @@
 
 // Mock Dashboard/server before requiring taskQueue
 jest.mock('../../Dashboard/server', () => ({
-  pushStatusUpdate: jest.fn()
+  pushStatusUpdate: jest.fn(),
+  broadcastToClients: jest.fn(),
+}));
+
+// Mock logger to suppress output during tests
+jest.mock('../../Logs/logger', () => ({
+  logInfo: jest.fn(),
+  logSuccess: jest.fn(),
+  logFail: jest.fn(),
 }));
 
 const { TaskQueue } = require('../../Task/taskQueue');
@@ -486,6 +494,211 @@ describe('Task/taskQueue.js', () => {
 
       // Should complete without error
       expect(queue.queue.length).toBe(0);
+    });
+  });
+
+  // ================================================================ Persistence Integration Tests
+
+  describe('Persistence Integration', () => {
+    const path = require('path');
+    const fs = require('fs');
+    const os = require('os');
+
+    function tempDbPath() {
+      const dir = path.join(os.tmpdir(), 'tq-persist-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+      fs.mkdirSync(dir, { recursive: true });
+      return path.join(dir, 'test.db');
+    }
+
+    describe('getPersistentStatus()', () => {
+      it('should return null when persistence is not enabled', () => {
+        const queue = new TaskQueue({ concurrency: 1 });
+        expect(queue.getPersistentStatus()).toBeNull();
+      });
+
+      it('should return stats when persistence is enabled', () => {
+        const dbPath = tempDbPath();
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+        });
+
+        const status = queue.getPersistentStatus();
+        expect(status).not.toBeNull();
+        expect(status).toHaveProperty('pending');
+        expect(status).toHaveProperty('processing');
+        expect(status).toHaveProperty('completed');
+        expect(status).toHaveProperty('failed');
+        expect(status).toHaveProperty('total');
+
+        queue.closePersistence();
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+    });
+
+    describe('getRecentTasks()', () => {
+      it('should return null when persistence is not enabled', () => {
+        const queue = new TaskQueue({ concurrency: 1 });
+        expect(queue.getRecentTasks()).toBeNull();
+      });
+    });
+
+    describe('requeueTask()', () => {
+      it('should return error when persistence is not enabled', () => {
+        const queue = new TaskQueue({ concurrency: 1 });
+        const result = queue.requeueTask(1);
+        expect(result.success).toBe(false);
+        expect(result.message).toContain('not enabled');
+      });
+
+      it('should requeue a failed task from persistent store', () => {
+        const dbPath = tempDbPath();
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+        });
+
+        // Directly add and fail a task via persistent queue
+        const { id } = queue.persistent.enqueue({ orderId: 'RQ-1' });
+        queue.persistent.dequeue();
+        queue.persistent.markFailed(id, 'test error');
+
+        const result = queue.requeueTask(id);
+        expect(result.success).toBe(true);
+
+        const task = queue.persistent.getById(id);
+        expect(task.status).toBe('pending');
+
+        queue.closePersistence();
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+
+      it('should reject requeue for non-failed tasks', () => {
+        const dbPath = tempDbPath();
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+        });
+
+        const { id } = queue.persistent.enqueue({ orderId: 'RQ-2' });
+
+        const result = queue.requeueTask(id);
+        expect(result.success).toBe(false);
+        expect(result.message).toContain('pending');
+
+        queue.closePersistence();
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+    });
+
+    describe('Task lifecycle with persistence', () => {
+      it('should track successful task in persistent store', async () => {
+        const dbPath = tempDbPath();
+        const results = [];
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+          onSuccess: (r) => results.push(r),
+        });
+
+        queue.addTask(
+          async () => ({ orderId: 'P-1', success: true }),
+          { orderId: 'P-1', url: 'http://test.com' }
+        );
+
+        await new Promise(r => setTimeout(r, 200));
+
+        expect(results).toHaveLength(1);
+
+        const status = queue.getPersistentStatus();
+        expect(status.completed).toBe(1);
+
+        queue.closePersistence();
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+
+      it('should track failed task in persistent store', async () => {
+        const dbPath = tempDbPath();
+        const errors = [];
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+          onError: (e) => errors.push(e.message),
+        });
+
+        queue.addTask(
+          async () => { throw new Error('Task failed!'); },
+          { orderId: 'F-1' }
+        );
+
+        await new Promise(r => setTimeout(r, 200));
+
+        expect(errors).toEqual(['Task failed!']);
+        const status = queue.getPersistentStatus();
+        expect(status.failed).toBe(1);
+
+        queue.closePersistence();
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+
+      it('should work without taskMeta when persistence is enabled', async () => {
+        const dbPath = tempDbPath();
+        const results = [];
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+          onSuccess: (r) => results.push(r),
+        });
+
+        // No taskMeta
+        queue.addTask(async () => 'no-meta');
+
+        await new Promise(r => setTimeout(r, 100));
+
+        expect(results).toEqual(['no-meta']);
+        expect(queue.getPersistentStatus().total).toBe(0);
+
+        queue.closePersistence();
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+    });
+
+    describe('closePersistence()', () => {
+      it('should close and nullify persistent reference', () => {
+        const dbPath = tempDbPath();
+        const queue = new TaskQueue({
+          concurrency: 1,
+          enablePersistence: true,
+          persistConfig: { dbPath, recoveryOnBoot: false },
+        });
+
+        expect(queue.persistent).not.toBeNull();
+        queue.closePersistence();
+        expect(queue.persistent).toBeNull();
+
+        fs.rmSync(path.dirname(dbPath), { recursive: true, force: true });
+      });
+
+      it('should be safe to call multiple times', () => {
+        const queue = new TaskQueue({ concurrency: 1 });
+        expect(() => {
+          queue.closePersistence();
+          queue.closePersistence();
+        }).not.toThrow();
+      });
+    });
+
+    describe('cleanupOldTasks()', () => {
+      it('should return 0 when persistence is not enabled', () => {
+        const queue = new TaskQueue({ concurrency: 1 });
+        expect(queue.cleanupOldTasks()).toBe(0);
+      });
     });
   });
 });

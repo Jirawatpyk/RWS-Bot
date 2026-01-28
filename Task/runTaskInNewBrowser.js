@@ -1,5 +1,6 @@
-// Task/runTaskInNewBrowser.js - Updated with Browser Pool
+// Task/runTaskInNewBrowser.js - Updated with Browser Pool + Health Monitor
 const BrowserPool = require('../BrowserPool/browserPool');
+const BrowserHealthMonitor = require('../BrowserPool/healthMonitor');
 const execAccept = require('../Exec/execAccept');
 const withTimeout = require('../Utils/taskTimeout');
 const { TIMEOUTS } = require('../Config/constants');
@@ -7,8 +8,9 @@ const { TIMEOUTS } = require('../Config/constants');
 // Config: ใช้จาก env หรือ default from constants
 const TASK_TIMEOUT_MS = parseInt(process.env.TASK_TIMEOUT_MS, 10) || TIMEOUTS.TASK_EXECUTION;
 
-// singleton browser pool
+// singleton browser pool and health monitor
 let browserPool = null;
+let healthMonitor = null;
 
 function normalizeUrl(url) {
   if (!url || typeof url !== 'string') {
@@ -21,15 +23,43 @@ function normalizeUrl(url) {
   return url;
 }
 
-async function initializeBrowserPool(poolSize = 4) {
+/**
+ * Initialize browser pool and optionally start health monitoring.
+ * @param {number} poolSize - number of browser slots
+ * @param {Object} [options] - optional dependencies for health monitoring
+ * @param {Object} [options.metricsCollector] - MetricsCollector instance
+ * @param {Object} [options.notifier] - Notifier with notifyGoogleChat method
+ * @returns {Promise<BrowserPool>}
+ */
+async function initializeBrowserPool(poolSize = 4, options = {}) {
   if (!browserPool) {
     browserPool = new BrowserPool({ poolSize });
     await browserPool.initialize();
+
+    // Start health monitoring after pool is ready
+    try {
+      healthMonitor = new BrowserHealthMonitor(
+        browserPool,
+        options.metricsCollector || null,
+        options.notifier || null
+      );
+      healthMonitor.startMonitoring();
+    } catch (err) {
+      // Health monitor failure should not block pool initialization
+      const { logFail } = require('../Logs/logger');
+      logFail(`[HealthMonitor] Failed to start: ${err.message}`);
+      healthMonitor = null;
+    }
   }
   return browserPool;
 }
 
 async function closeBrowserPool() {
+  // Stop health monitoring before closing the pool
+  if (healthMonitor) {
+    healthMonitor.stopMonitoring();
+    healthMonitor = null;
+  }
   if (browserPool) {
     await browserPool.closeAll();
     browserPool = null;
@@ -120,4 +150,7 @@ module.exports.closeBrowserPool = closeBrowserPool;
 module.exports.getBrowserPool = () => browserPool;
 module.exports.getBrowserPoolStatus = () => {
   return browserPool ? browserPool.getStatus() : { status: 'not initialized' };
+};
+module.exports.getBrowserHealthStatus = () => {
+  return healthMonitor ? healthMonitor.getHealthSnapshot() : { monitoring: false };
 };

@@ -29,11 +29,16 @@ async function writeCapacityLog(entry) {
 }
 const { getAllStatus } = require("./statusManager/taskStatusStore");
 const { logSuccess, logInfo } = require("../Logs/logger");
+const { stateManager } = require('../State/stateManager');
+const { StateSyncService } = require('../State/stateSyncService');
 const { pauseImap, resumeImap, isImapPaused, getConnectionStats, getIMAPHealthStatus } = require("../IMAP/imapClient");
-const { getBrowserPoolStatus } = require('../Task/runTaskInNewBrowser');
+const { getBrowserPoolStatus, getBrowserHealthStatus } = require('../Task/runTaskInNewBrowser');
 const { metricsCollector } = require('../Metrics/metricsCollector');
 const { TIMEOUTS } = require('../Config/constants');
 const { withFileLock, saveJSONAtomic } = require('../Utils/fileUtils');
+const { workingHoursManager } = require('../Task/workingHoursManager');
+const { getSheetCircuitBreakerStatus } = require('../Sheets/sheetCircuitBreaker');
+const { capacityLearner } = require('../Features/capacityLearner');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -58,12 +63,33 @@ const {
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "../public")));
 
+// GET browser health status (memory, pages, recycle history)
+app.get('/api/health/browser', (req, res) => {
+  try {
+    const health = getBrowserHealthStatus();
+    const poolStatus = getBrowserPoolStatus();
+    res.json({ pool: poolStatus, health });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET IMAP health status (connection stats + health monitor snapshot)
 app.get('/api/health/imap', (req, res) => {
   try {
     const stats = getConnectionStats();
     const health = getIMAPHealthStatus();
     res.json({ connection: stats, health });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET Google Sheets circuit breaker health status
+app.get('/api/health/sheets', (req, res) => {
+  try {
+    const status = getSheetCircuitBreakerStatus();
+    res.json(status);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -137,7 +163,48 @@ app.post('/api/adjust', async (req, res) => {
   res.json({ success: true });
 });
 
-// GET /api/capacity/:date
+/* ========================= Capacity Learning API ========================= */
+// IMPORTANT: Static routes MUST be registered before parameterized /:date route
+// to prevent Express from matching "/api/capacity/analysis" as { date: "analysis" }
+
+// GET /api/capacity/analysis — full analysis of past performance
+app.get('/api/capacity/analysis', (req, res) => {
+  try {
+    const days = parseInt(req.query.days, 10) || 30;
+    const analysis = capacityLearner.analyzePastPerformance(days);
+    res.json(analysis);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/capacity/suggestions — suggestions only (lightweight)
+app.get('/api/capacity/suggestions', (req, res) => {
+  try {
+    const days = parseInt(req.query.days, 10) || 30;
+    const analysis = capacityLearner.analyzePastPerformance(days);
+    res.json({
+      period: analysis.period,
+      totalDays: analysis.totalDays,
+      avgUtilization: analysis.avgUtilization,
+      suggestions: analysis.suggestions,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/capacity/summary — dashboard-friendly summary with recommendation
+app.get('/api/capacity/summary', (req, res) => {
+  try {
+    const summary = capacityLearner.getSummary();
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/capacity/:date — parameterized route MUST come after static routes
 app.get('/api/capacity/:date', (req, res) => {
   const remaining = getRemainingCapacity(req.params.date);
   res.json({ remaining });
@@ -321,6 +388,309 @@ async function cleanupOldCapacityAndOverride(datesToDelete = null) {
 }
 
 
+/* ========================= Working Hours API ========================= */
+
+// GET /api/working-hours — current working hours status + schedule
+app.get('/api/working-hours', (req, res) => {
+  try {
+    const status = workingHoursManager.getStatus();
+    res.json(status);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/working-hours/:date — working hours for a specific date
+app.get('/api/working-hours/:date', (req, res) => {
+  try {
+    const { date } = req.params;
+    const hours = workingHoursManager.getWorkingHours(date);
+    const isWorking = hours !== null;
+    res.json({ date, hours, isWorkingDay: isWorking });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/working-hours/overtime — set overtime schedule for a date
+app.post('/api/working-hours/overtime', (req, res) => {
+  try {
+    const { date, start, end } = req.body;
+    if (!date || typeof start !== 'number' || typeof end !== 'number') {
+      return res.status(400).json({ error: 'Required: date (string), start (number), end (number)' });
+    }
+    workingHoursManager.setOvertimeSchedule(date, { start, end });
+    logSuccess(`OT schedule set: ${date} ${start}:00-${end}:00`);
+    broadcastToClients({ type: 'workingHoursUpdated', date });
+    res.json({ success: true, date, hours: { start, end } });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// DELETE /api/working-hours/overtime/:date — remove overtime for a date
+app.delete('/api/working-hours/overtime/:date', (req, res) => {
+  try {
+    const { date } = req.params;
+    const removed = workingHoursManager.removeOvertimeSchedule(date);
+    if (removed) {
+      logInfo(`OT schedule removed: ${date}`);
+      broadcastToClients({ type: 'workingHoursUpdated', date });
+    }
+    res.json({ success: true, removed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/working-hours/overtime — get all overtime schedules
+app.get('/api/working-hours/overtime', (req, res) => {
+  try {
+    const schedule = workingHoursManager.getOvertimeSchedule();
+    res.json(schedule);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ========================= Holidays API ========================= */
+
+// GET /api/holidays — get holidays (optionally filter by year)
+app.get('/api/holidays', (req, res) => {
+  try {
+    const year = req.query.year ? parseInt(req.query.year, 10) : undefined;
+    const holidays = workingHoursManager.getHolidays(year);
+    res.json(holidays);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/holidays — add a company extra holiday
+app.post('/api/holidays', (req, res) => {
+  try {
+    const { date } = req.body;
+    if (!date || typeof date !== 'string') {
+      return res.status(400).json({ error: 'Required: date (YYYY-MM-DD string)' });
+    }
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+    const added = workingHoursManager.addHoliday(date);
+    if (added) {
+      logInfo(`Holiday added: ${date}`);
+      broadcastToClients({ type: 'workingHoursUpdated', date });
+    }
+    res.json({ success: true, added });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/holidays/:date — remove a company extra holiday
+app.delete('/api/holidays/:date', (req, res) => {
+  try {
+    const { date } = req.params;
+    const removed = workingHoursManager.removeHoliday(date);
+    if (removed) {
+      logInfo(`Holiday removed: ${date}`);
+      broadcastToClients({ type: 'workingHoursUpdated', date });
+    }
+    res.json({ success: true, removed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/holidays/working — mark a public holiday as a working day
+app.post('/api/holidays/working', (req, res) => {
+  try {
+    const { date } = req.body;
+    if (!date || typeof date !== 'string') {
+      return res.status(400).json({ error: 'Required: date (YYYY-MM-DD string)' });
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+    }
+    const added = workingHoursManager.addWorkingHoliday(date);
+    if (added) {
+      logInfo(`Working holiday added: ${date}`);
+      broadcastToClients({ type: 'workingHoursUpdated', date });
+    }
+    res.json({ success: true, added });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/holidays/working/:date — remove working holiday override
+app.delete('/api/holidays/working/:date', (req, res) => {
+  try {
+    const { date } = req.params;
+    const removed = workingHoursManager.removeWorkingHoliday(date);
+    if (removed) {
+      logInfo(`Working holiday removed: ${date}`);
+      broadcastToClients({ type: 'workingHoursUpdated', date });
+    }
+    res.json({ success: true, removed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ========================= Status Sync API ========================= */
+
+// Lazy reference - set by bootstrapper after MoraviaStatusSync is created
+let _moraviaStatusSync = null;
+
+/**
+ * Allow bootstrapper to inject the MoraviaStatusSync instance after creation.
+ * This avoids circular dependency and keeps server.js decoupled.
+ */
+function setStatusSync(instance) {
+  _moraviaStatusSync = instance;
+}
+
+// GET /api/sync/status - current sync status
+app.get('/api/sync/status', (req, res) => {
+  if (!_moraviaStatusSync) {
+    return res.json({ enabled: false, message: 'StatusSync not initialized' });
+  }
+  res.json(_moraviaStatusSync.getStatus());
+});
+
+// POST /api/sync/trigger - trigger manual sync
+app.post('/api/sync/trigger', async (req, res) => {
+  if (!_moraviaStatusSync) {
+    return res.status(503).json({ error: 'StatusSync not initialized' });
+  }
+  try {
+    const result = await _moraviaStatusSync.sync();
+    if (result === null) {
+      return res.status(409).json({ error: 'Sync already in progress' });
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ========================= Post-Accept Verification API ========================= */
+
+let _postAcceptVerifier = null;
+
+/**
+ * Allow bootstrapper/taskHandler to inject PostAcceptVerifier instance.
+ * Follows same setter pattern as setStatusSync to avoid circular deps.
+ */
+function setPostAcceptVerifier(instance) {
+  _postAcceptVerifier = instance;
+}
+
+// GET /api/verification/status - current verification queue status
+app.get('/api/verification/status', (req, res) => {
+  if (!_postAcceptVerifier) {
+    return res.json({ enabled: false, message: 'PostAcceptVerifier not initialized' });
+  }
+  res.json({ enabled: true, ...(_postAcceptVerifier.getStatus()) });
+});
+
+// GET /api/verification/results - recent verification results (last 100)
+app.get('/api/verification/results', (req, res) => {
+  if (!_postAcceptVerifier) {
+    return res.json({ enabled: false, results: [] });
+  }
+  res.json({ enabled: true, results: _postAcceptVerifier.getResults() });
+});
+
+/* ========================= State API ========================= */
+
+// GET /api/state - full state snapshot from centralized StateManager
+app.get('/api/state', (req, res) => {
+  try {
+    const snapshot = stateManager.getSnapshot();
+    res.json(snapshot);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/* ========================= Persistent Queue API ========================= */
+
+// Lazy reference - set by caller (bootstrapper/taskHandler) after queue is created
+let _persistentQueueRef = null;
+
+/**
+ * Allow external code to inject the TaskQueue instance for dashboard access.
+ * @param {import('../Task/taskQueue').TaskQueue} queue
+ */
+function setTaskQueue(queue) {
+  _persistentQueueRef = queue;
+}
+
+// GET /api/queue/status — persistent queue stats
+app.get('/api/queue/status', (req, res) => {
+  if (!_persistentQueueRef) {
+    return res.json({ enabled: false, message: 'Queue reference not set' });
+  }
+  const persistentStatus = _persistentQueueRef.getPersistentStatus();
+  if (!persistentStatus) {
+    return res.json({
+      enabled: false,
+      inMemory: {
+        queued: _persistentQueueRef.queue.length,
+        processing: _persistentQueueRef.processing.size,
+      },
+    });
+  }
+  res.json({
+    enabled: true,
+    persistent: persistentStatus,
+    inMemory: {
+      queued: _persistentQueueRef.queue.length,
+      processing: _persistentQueueRef.processing.size,
+    },
+  });
+});
+
+// GET /api/queue/recent — recent tasks from persistent store
+app.get('/api/queue/recent', (req, res) => {
+  if (!_persistentQueueRef) {
+    return res.json({ enabled: false, tasks: [] });
+  }
+  const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+  const tasks = _persistentQueueRef.getRecentTasks(limit);
+  res.json({ enabled: tasks !== null, tasks: tasks || [] });
+});
+
+// POST /api/queue/retry/:id — requeue a failed task by persistent ID
+app.post('/api/queue/retry/:id', (req, res) => {
+  if (!_persistentQueueRef) {
+    return res.status(503).json({ success: false, message: 'Queue reference not set' });
+  }
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id)) {
+    return res.status(400).json({ success: false, message: 'Invalid task ID' });
+  }
+  const result = _persistentQueueRef.requeueTask(id);
+  if (!result.success) {
+    return res.status(result.message === 'Persistence not enabled' ? 503 : 400).json(result);
+  }
+  broadcastToClients({ type: 'queueUpdated' });
+  res.json(result);
+});
+
+// POST /api/queue/cleanup — delete old completed/failed tasks
+app.post('/api/queue/cleanup', (req, res) => {
+  if (!_persistentQueueRef) {
+    return res.status(503).json({ success: false, message: 'Queue reference not set' });
+  }
+  const olderThanMs = req.body?.olderThanMs;
+  const deleted = _persistentQueueRef.cleanupOldTasks(olderThanMs);
+  res.json({ success: true, deleted });
+});
+
 app.post("/api/cleanup", async (req, res) => {
   try {
     const dates = req.body?.dates;
@@ -343,6 +713,9 @@ function broadcastToClients(data) {
     }
   });
 }
+
+// Initialize StateSyncService to auto-broadcast state changes to WebSocket clients
+const stateSyncService = new StateSyncService(stateManager, broadcastToClients);
 
 function pushStatusUpdate() {
   const status = getAllStatus();
@@ -435,6 +808,11 @@ if (process.env.NODE_ENV !== 'test') {
 module.exports = {
   pushStatusUpdate,
   broadcastToClients,
+  setStatusSync,
+  setPostAcceptVerifier,
+  setTaskQueue,
+  stateSyncService,
+  stateManager,
   server,
   wss,
   app

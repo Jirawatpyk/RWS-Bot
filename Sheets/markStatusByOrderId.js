@@ -1,8 +1,7 @@
 // Sheets/markStatusByOrderId.js
-const { google } = require('googleapis');
-const { auth } = require('../Google/auth');
 const { logInfo, logFail, logProgress } = require('../Logs/logger');
 const config = require('../Config/configs');
+const { safeUpdateSheet, safeGetSheet } = require('./sheetCircuitBreaker');
 const dayjs = require('dayjs');
 const customParseFormat = require('dayjs/plugin/customParseFormat');
 dayjs.extend(customParseFormat);
@@ -32,7 +31,6 @@ function columnToIndex(col) {
  * @param {string|null} receivedDate - Received date from email (format: 'YYYY-MM-DD h:mm A')
  */
 async function markStatusByOrderId(orderId, status, pmName = 'DTP', receivedDate = null) {
-  const sheets = google.sheets({ version: 'v4', auth });
   const { sheetId: spreadsheetId, tabName, orderIdColumn, statusColumn, pmNameColumn, receivedDateColumn } =
     config.jobLinks.TrackingSheet;
 
@@ -44,10 +42,10 @@ async function markStatusByOrderId(orderId, status, pmName = 'DTP', receivedDate
       ? `${tabName}!${orderIdColumn}5:${receivedDateColumn}${endRow}`
       : `${tabName}!${orderIdColumn}5:${orderIdColumn}${endRow}`;
 
-    const response = await sheets.spreadsheets.values.get({
+    const response = await safeGetSheet({
       spreadsheetId,
       range,
-      majorDimension: 'ROWS'
+      majorDimension: 'ROWS',
     });
 
     const rows = response.data.values || [];
@@ -97,18 +95,18 @@ async function markStatusByOrderId(orderId, status, pmName = 'DTP', receivedDate
     const statusRange = `${tabName}!${statusColumn}${realRow}`;
     const pmRange     = `${tabName}!${pmNameColumn}${realRow}`;
 
-    await sheets.spreadsheets.values.update({
+    await safeUpdateSheet({
       spreadsheetId,
       range: statusRange,
+      values: [[status]],
       valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [[status]] }
     });
 
-    await sheets.spreadsheets.values.update({
+    await safeUpdateSheet({
       spreadsheetId,
       range: pmRange,
+      values: [[pmName]],
       valueInputOption: 'USER_ENTERED',
-      requestBody: { values: [[pmName]] }
     });
 
     logInfo(`✅ Updated status to "${status}" at ${tabName}!${statusColumn}${realRow} (Order: ${orderId}, Date: ${receivedDate || 'N/A'})`);

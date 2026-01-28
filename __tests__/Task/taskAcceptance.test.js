@@ -58,6 +58,7 @@ describe('Task/taskAcceptance.js', () => {
       expect(REASONS.REJECT_URGENT_OUT_OF_HOURS).toBe('REJECT_URGENT_OUT_OF_HOURS');
       expect(REASONS.REJECT_CAPACITY).toBe('REJECT_CAPACITY');
       expect(REASONS.REJECT_INVALID_DEADLINE).toBe('REJECT_INVALID_DEADLINE');
+      expect(REASONS.REJECT_HOLIDAY).toBe('REJECT_HOLIDAY');
     });
   });
 
@@ -145,38 +146,45 @@ describe('Task/taskAcceptance.js', () => {
   describe('isWithinWorkingHours()', () => {
     const policy = { workStartHour: 10, workEndHour: 19 };
 
+    // Note: Use 2026-01-26 (Monday) instead of 2026-01-25 (Sunday)
+    // because isWithinWorkingHours now checks holiday/weekend via WorkingHoursManager
     it('should return true for 10:00 (start of working hours)', () => {
-      const time = dayjs('2026-01-25 10:00', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 10:00', 'YYYY-MM-DD HH:mm');
       expect(isWithinWorkingHours(time, policy)).toBe(true);
     });
 
     it('should return true for 14:00 (middle of working hours)', () => {
-      const time = dayjs('2026-01-25 14:00', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 14:00', 'YYYY-MM-DD HH:mm');
       expect(isWithinWorkingHours(time, policy)).toBe(true);
     });
 
     it('should return true for 18:59 (last minute of working hours)', () => {
-      const time = dayjs('2026-01-25 18:59', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 18:59', 'YYYY-MM-DD HH:mm');
       expect(isWithinWorkingHours(time, policy)).toBe(true);
     });
 
     it('should return false for 19:00 (end of working hours - exclusive)', () => {
-      const time = dayjs('2026-01-25 19:00', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 19:00', 'YYYY-MM-DD HH:mm');
       expect(isWithinWorkingHours(time, policy)).toBe(false);
     });
 
     it('should return false for 09:59 (before working hours)', () => {
-      const time = dayjs('2026-01-25 09:59', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 09:59', 'YYYY-MM-DD HH:mm');
       expect(isWithinWorkingHours(time, policy)).toBe(false);
     });
 
     it('should return false for 20:00 (after working hours)', () => {
-      const time = dayjs('2026-01-25 20:00', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 20:00', 'YYYY-MM-DD HH:mm');
       expect(isWithinWorkingHours(time, policy)).toBe(false);
     });
 
     it('should return false for 08:00 (early morning)', () => {
-      const time = dayjs('2026-01-25 08:00', 'YYYY-MM-DD HH:mm');
+      const time = dayjs('2026-01-26 08:00', 'YYYY-MM-DD HH:mm');
+      expect(isWithinWorkingHours(time, policy)).toBe(false);
+    });
+
+    it('should return false on weekends even during working hours', () => {
+      const time = dayjs('2026-01-25 14:00', 'YYYY-MM-DD HH:mm'); // Sunday
       expect(isWithinWorkingHours(time, policy)).toBe(false);
     });
   });
@@ -325,9 +333,9 @@ describe('Task/taskAcceptance.js', () => {
 
   describe('evaluateTaskAcceptance() - Urgent Tasks', () => {
     beforeEach(() => {
-      // Mock current time to 2026-01-25 14:00
+      // Mock current time to 2026-01-26 14:00 (Monday)
       jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-01-25 14:00:00'));
+      jest.setSystemTime(new Date('2026-01-26 14:00:00'));
     });
 
     afterEach(() => {
@@ -338,7 +346,7 @@ describe('Task/taskAcceptance.js', () => {
       const result = evaluateTaskAcceptance({
         orderId: 'URGENT001',
         amountWords: 3000,
-        plannedEndDate: '2026-01-25 20:00'
+        plannedEndDate: '2026-01-26 20:00'
       });
 
       expect(result.accepted).toBe(false);
@@ -349,13 +357,13 @@ describe('Task/taskAcceptance.js', () => {
 
     it('should reject urgent task outside working hours (deadline at 19:30, 5.5 hours away)', () => {
       // 14:00 + 5.5 hours = 19:30, which is urgent (< 6 hours) but outside working hours (>= 19:00)
-      const mockPlan = [{ date: '2026-01-25', amount: 3000 }];
+      const mockPlan = [{ date: '2026-01-26', amount: 3000 }];
       getAvailableDates.mockReturnValue(mockPlan);
 
       const result = evaluateTaskAcceptance({
         orderId: 'URGENT002',
         amountWords: 3000,
-        plannedEndDate: '2026-01-25 19:30'
+        plannedEndDate: '2026-01-26 19:30'
       });
 
       expect(result.accepted).toBe(false);
@@ -365,13 +373,13 @@ describe('Task/taskAcceptance.js', () => {
     });
 
     it('should accept urgent task within working hours with capacity', () => {
-      const mockPlan = [{ date: '2026-01-25', amount: 3000 }];
+      const mockPlan = [{ date: '2026-01-26', amount: 3000 }];
       getAvailableDates.mockReturnValue(mockPlan);
 
       const result = evaluateTaskAcceptance({
         orderId: 'URGENT003',
         amountWords: 3000,
-        plannedEndDate: '2026-01-25 18:00'
+        plannedEndDate: '2026-01-26 18:00'
       });
 
       expect(result.accepted).toBe(true);
@@ -384,7 +392,7 @@ describe('Task/taskAcceptance.js', () => {
   describe('evaluateTaskAcceptance() - Capacity Checks', () => {
     beforeEach(() => {
       jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-01-25 14:00:00'));
+      jest.setSystemTime(new Date('2026-01-26 14:00:00')); // Monday
     });
 
     afterEach(() => {
@@ -463,7 +471,7 @@ describe('Task/taskAcceptance.js', () => {
   describe('evaluateTaskAcceptance() - Normal Acceptance', () => {
     beforeEach(() => {
       jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-01-25 14:00:00'));
+      jest.setSystemTime(new Date('2026-01-26 14:00:00')); // Monday
     });
 
     afterEach(() => {
@@ -494,7 +502,7 @@ describe('Task/taskAcceptance.js', () => {
   describe('evaluateTaskAcceptance() - Policy Overrides', () => {
     beforeEach(() => {
       jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-01-25 14:00:00'));
+      jest.setSystemTime(new Date('2026-01-26 14:00:00')); // Monday
     });
 
     afterEach(() => {
@@ -502,14 +510,14 @@ describe('Task/taskAcceptance.js', () => {
     });
 
     it('should respect custom urgentHoursThreshold', () => {
-      const mockPlan = [{ date: '2026-01-25', amount: 3000 }];
+      const mockPlan = [{ date: '2026-01-26', amount: 3000 }];
       getAvailableDates.mockReturnValue(mockPlan);
 
       const result = evaluateTaskAcceptance(
         {
           orderId: 'OVERRIDE001',
           amountWords: 3000,
-          plannedEndDate: '2026-01-25 22:00' // 8 hours away
+          plannedEndDate: '2026-01-26 22:00' // 8 hours away
         },
         { urgentHoursThreshold: 10 } // Custom threshold
       );
@@ -519,31 +527,34 @@ describe('Task/taskAcceptance.js', () => {
       expect(result.code).toBe(REASONS.REJECT_URGENT_OUT_OF_HOURS);
     });
 
-    it('should respect custom working hours', () => {
-      const mockPlan = [{ date: '2026-01-25', amount: 3000 }];
+    it('should respect dynamic working hours (OT override)', () => {
+      // Set OT hours for Monday 2026-01-26 to extend to 21:00
+      const { workingHoursManager } = require('../../Task/workingHoursManager');
+      workingHoursManager.setOvertimeSchedule('2026-01-26', { start: 8, end: 21 });
+
+      const mockPlan = [{ date: '2026-01-26', amount: 3000 }];
       getAvailableDates.mockReturnValue(mockPlan);
 
       const result = evaluateTaskAcceptance(
         {
           orderId: 'OVERRIDE002',
           amountWords: 3000,
-          plannedEndDate: '2026-01-25 20:00'
-        },
-        {
-          workStartHour: 8,
-          workEndHour: 21 // Extended working hours
+          plannedEndDate: '2026-01-26 20:00'
         }
       );
 
-      // With extended hours, 20:00 is within working hours
+      // With OT extended hours (8-21), 20:00 is within working hours
       expect(result.inWorkingHours).toBe(true);
+
+      // Cleanup
+      workingHoursManager.removeOvertimeSchedule('2026-01-26');
     });
   });
 
   describe('evaluateTaskAcceptance() - Edge Cases', () => {
     beforeEach(() => {
       jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-01-25 14:00:00'));
+      jest.setSystemTime(new Date('2026-01-26 14:00:00')); // Monday
     });
 
     afterEach(() => {
@@ -618,7 +629,7 @@ describe('Task/taskAcceptance.js', () => {
   describe('evaluateTaskAcceptance() - Boundary Hours (exactly 6 hours)', () => {
     beforeEach(() => {
       jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-01-25 12:00:00'));
+      jest.setSystemTime(new Date('2026-01-26 12:00:00')); // Monday
     });
 
     afterEach(() => {
@@ -626,13 +637,13 @@ describe('Task/taskAcceptance.js', () => {
     });
 
     it('should treat task exactly 6 hours away as urgent', () => {
-      const mockPlan = [{ date: '2026-01-25', amount: 3000 }];
+      const mockPlan = [{ date: '2026-01-26', amount: 3000 }];
       getAvailableDates.mockReturnValue(mockPlan);
 
       const result = evaluateTaskAcceptance({
         orderId: 'BOUNDARY001',
         amountWords: 3000,
-        plannedEndDate: '2026-01-25 18:00' // Exactly 6 hours away
+        plannedEndDate: '2026-01-26 18:00' // Exactly 6 hours away
       });
 
       expect(result.urgent).toBe(true);
@@ -641,13 +652,13 @@ describe('Task/taskAcceptance.js', () => {
     });
 
     it('should treat task at 7 hours away as not urgent', () => {
-      const mockPlan = [{ date: '2026-01-25', amount: 3000 }];
+      const mockPlan = [{ date: '2026-01-26', amount: 3000 }];
       getAvailableDates.mockReturnValue(mockPlan);
 
       const result = evaluateTaskAcceptance({
         orderId: 'BOUNDARY002',
         amountWords: 3000,
-        plannedEndDate: '2026-01-25 21:00' // 7 hours away (definitely > 6)
+        plannedEndDate: '2026-01-26 21:00' // 7 hours away (definitely > 6)
       });
 
       expect(result.urgent).toBe(false);

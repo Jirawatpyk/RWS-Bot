@@ -1,25 +1,24 @@
-const { google } = require('googleapis');
-const { auth } = require('../Google/auth');
 const dayjs = require('dayjs');
 const { logSuccess, logFail } = require('../Logs/logger');
 const { DEFAULT_SHEET_KEY, jobLinks } = require('../Config/configs');
+const { safeAppendToSheet } = require('./sheetCircuitBreaker');
 
 async function appendStatusToMainSheet({ url, status, reason, timestamp, sheetKey }) {
   const usedSheetKey = sheetKey || DEFAULT_SHEET_KEY;
   const config = jobLinks[usedSheetKey];
-  
+
   if (!config) throw new Error(`❌ MainSheet config not found`);
 
   const range = `${config.tabName}!${config.LinksOrderColumn}:${config.TimestampColumn}`;
   const values = [[url, status, reason, timestamp || dayjs().format('YYYY-MM-DD HH:mm:ss')]];
 
   try {
-    await google.sheets({ version: 'v4', auth }).spreadsheets.values.append({
+    await safeAppendToSheet({
       spreadsheetId: config.sheetId,
       range,
+      values,
       valueInputOption: 'USER_ENTERED',
       insertDataOption: 'INSERT_ROWS',
-      requestBody: { values }
     });
 
     logSuccess(`📝 Append to ${usedSheetKey} successful.`);

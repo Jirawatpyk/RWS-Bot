@@ -18,6 +18,7 @@ const isSameOrBefore = require('dayjs/plugin/isSameOrBefore');
 // getAvailableDates(amountWords, effectiveDeadline, excludeToday)
 const { getAvailableDates } = require('./CapacityTracker');
 const { WORKING_HOURS, CAPACITY } = require('../Config/constants');
+const { workingHoursManager } = require('./workingHoursManager');
 
 // Register plugins locally (keeps this module self-contained)
 dayjs.extend(customParseFormat);
@@ -40,7 +41,8 @@ const REASONS = Object.freeze({
 
   REJECT_URGENT_OUT_OF_HOURS: 'REJECT_URGENT_OUT_OF_HOURS',
   REJECT_CAPACITY: 'REJECT_CAPACITY',
-  REJECT_INVALID_DEADLINE: 'REJECT_INVALID_DEADLINE'
+  REJECT_INVALID_DEADLINE: 'REJECT_INVALID_DEADLINE',
+  REJECT_HOLIDAY: 'REJECT_HOLIDAY'
 });
 
 /* ========================= Utilities ========================= */
@@ -73,17 +75,31 @@ function adjustMidnight(deadline) {
 
 /**
  * Determine whether a given time is within working hours.
+ * Uses WorkingHoursManager for dynamic hours (OT/holidays), falls back to policy defaults.
  */
 function isWithinWorkingHours(d, { workStartHour, workEndHour }) {
+  // Try dynamic hours first (supports OT overrides and holidays)
+  const dateStr = d.format('YYYY-MM-DD');
+  const dynamicHours = workingHoursManager.getWorkingHours(dateStr);
+
+  // If dynamicHours is null, the day is a holiday/weekend -> not within working hours
+  if (dynamicHours === null) {
+    return false;
+  }
+
   const h = d.hour();
-  return h >= workStartHour && h < workEndHour;
+  return h >= dynamicHours.start && h < dynamicHours.end;
 }
 
 /**
  * Night deadline classification (prior to workStartHour counts as night).
+ * Uses dynamic hours if available for OT scenarios.
  */
 function isNightDeadline(d, { workStartHour }) {
-  return d.hour() < workStartHour;
+  const dateStr = d.format('YYYY-MM-DD');
+  const dynamicHours = workingHoursManager.getWorkingHours(dateStr);
+  const effectiveStart = dynamicHours ? dynamicHours.start : workStartHour;
+  return d.hour() < effectiveStart;
 }
 
 /**
@@ -232,5 +248,7 @@ module.exports = {
   isNightDeadline,
   computeEffectiveDeadline,
   shouldExcludeToday,
-  planCapacity
+  planCapacity,
+  // expose workingHoursManager for external use (dashboard, etc.)
+  workingHoursManager
 };
