@@ -100,11 +100,11 @@ class SystemHealth {
   _browserCard(data) {
     const d = data || {};
     const pool = d.pool || {};
-    const healthMonitor = d.healthMonitor || {};
+    const healthMonitor = d.healthMonitor || d.health || {};
     const active = pool.busyBrowsers || pool.active || 0;
     const total = pool.totalBrowsers || pool.total || 0;
     const pages = pool.activePages || 0;
-    const recycled = healthMonitor.totalRecycles || 0;
+    const recycled = healthMonitor.totalRecycles || healthMonitor.recycleCount || 0;
     const isHealthy = total > 0;
     const statusClass = isHealthy ? 'online' : 'offline';
 
