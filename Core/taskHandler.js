@@ -15,7 +15,6 @@ const { markStatusWithRetry } = require('../Sheets/markStatusByOrderId');
 const runTaskInNewBrowser = require('../Task/runTaskInNewBrowser');
 const { getBrowserPoolStatus } = require('../Task/runTaskInNewBrowser');
 const { pushStatusUpdate, broadcastToClients, setTaskQueue } = require('../Dashboard/server');
-const { incrementStatus } = require('../Dashboard/statusManager/taskStatusStore');
 const { defaultConcurrency } = require('../Config/configs');
 const { logSuccess, logFail, logInfo, logProgress } = require('../Logs/logger');
 const { notifyGoogleChat } = require('../Logs/notifier');
@@ -24,6 +23,7 @@ const { recordFailure, resetFailure } = require('../Task/consecutiveFailureTrack
 const { capacityLearner } = require('../Features/capacityLearner');
 const { PostAcceptVerifier } = require('../Features/postAcceptVerifier');
 const capacityTracker = require('../Task/CapacityTracker');
+const { stateManager } = require('../State/stateManager');
 
 class TaskHandler {
   /**
@@ -92,6 +92,7 @@ class TaskHandler {
         logSuccess(`Task completed | Order ID: ${res.orderId} | Applied ${words} words | Allocated: ${planStr}`, true);
 
         if (res?.orderId) {
+          try { stateManager.removeActiveTask(res.orderId); } catch (_) { /* non-critical */ }
           appendAcceptedTask({
             timestamp: dayjs().format('YYYY-MM-DD HH:mm:ss'),
             orderId: res.orderId,
@@ -146,6 +147,7 @@ class TaskHandler {
 
         if (reasonText.includes('on hold')) {
           logFail(`Task failed (On Hold) | Order ID: ${err.orderId}`, true);
+          try { if (err.orderId) stateManager.removeActiveTask(err.orderId); } catch (_) { /* non-critical */ }
           await markStatusWithRetry(err.orderId, 'On Hold', 'DTP', err.receivedDate);
           this.eventBus.emitTaskFailed(err);
           return;
@@ -157,12 +159,14 @@ class TaskHandler {
           reasonText.includes('unable to read status')
         ) {
           logFail(`Task failed (Missed) | Order ID: ${err.orderId} | Reason: ${err.message}`, true);
+          try { if (err.orderId) stateManager.removeActiveTask(err.orderId); } catch (_) { /* non-critical */ }
           await markStatusWithRetry(err.orderId, 'Missed', 'DTP', err.receivedDate);
           this.eventBus.emitTaskFailed(err);
           return;
         }
 
         logFail(`Task failed | Order ID: ${err.orderId} | Reason: ${err.message}`, true);
+        try { if (err.orderId) stateManager.removeActiveTask(err.orderId); } catch (_) { /* non-critical */ }
         this.eventBus.emitTaskFailed(err);
       },
 
@@ -227,11 +231,21 @@ class TaskHandler {
       evalRes,
     );
 
+    try {
+      stateManager.addActiveTask({
+        orderId,
+        workflowName,
+        amountWords,
+        plannedEndDate: effectiveDeadline || plannedEndDate,
+        allocationPlan,
+        addedAt: Date.now(),
+      });
+    } catch (_) { /* non-critical */ }
+
     // Enqueue browser automation work
     this.queue.addTask(async () => {
       const context = { allocationPlan, acceptanceCode: code, processingStartMs: Date.now(), effectiveDeadline };
 
-      incrementStatus('pending');
       pushStatusUpdate();
 
       broadcastToClients({
@@ -241,7 +255,6 @@ class TaskHandler {
 
       const result = await runTaskInNewBrowser({ task: { url, orderId } });
 
-      incrementStatus(result.success ? 'success' : 'error');
       pushStatusUpdate();
 
       setTimeout(() => {

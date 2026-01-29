@@ -3,7 +3,7 @@
  *
  * ทดสอบการส่งข้อมูลผ่าน WebSocket
  * - การ initialize WebSocket server
- * - การ broadcast สถานะไปยัง clients ทั้งหมด
+ * - การ broadcast สถานะไปยัง clients ทั้งหมด (via MetricsCollector)
  * - การส่ง log entries ไปยัง clients
  * - จัดการกรณีที่ WebSocket ยังไม่ถูก initialize
  * - จัดการกรณีที่ client ไม่พร้อมรับข้อมูล
@@ -11,7 +11,7 @@
 
 describe('broadcast', () => {
   let broadcast;
-  let mockTaskStatusStore;
+  let mockMetricsCollector;
   let mockWss;
   let mockClient1;
   let mockClient2;
@@ -27,15 +27,21 @@ describe('broadcast', () => {
     consoleWarnSpy = jest.spyOn(console, 'warn').mockImplementation();
     consoleLogSpy = jest.spyOn(console, 'log').mockImplementation();
 
-    // Mock taskStatusStore
-    mockTaskStatusStore = {
-      getAllStatus: jest.fn().mockReturnValue({
-        pending: 5,
-        success: 10,
-        error: 2
+    // Mock MetricsCollector (single source of truth for task counters)
+    mockMetricsCollector = {
+      getSnapshot: jest.fn().mockReturnValue({
+        counters: {
+          tasksReceived: 15,
+          tasksAccepted: 12,
+          tasksRejected: 3,
+          tasksCompleted: 10,
+          tasksFailed: 2,
+        }
       })
     };
-    jest.mock('../../Dashboard/statusManager/taskStatusStore', () => mockTaskStatusStore);
+    jest.mock('../../Metrics/metricsCollector', () => ({
+      metricsCollector: mockMetricsCollector
+    }));
 
     // สร้าง mock clients
     mockClient1 = {
@@ -137,10 +143,9 @@ describe('broadcast', () => {
       // Act
       broadcast.broadcastStatus();
 
-      // Assert
+      // Assert — maps tasksCompleted→success, tasksFailed→error
       const expectedPayload = JSON.stringify({
         type: 'updateStatus',
-        pending: 5,
         success: 10,
         error: 2
       });
@@ -167,7 +172,7 @@ describe('broadcast', () => {
       expect(mockClient3.send).not.toHaveBeenCalled();
     });
 
-    it('should call getAllStatus to get current status', () => {
+    it('should read counters from MetricsCollector', () => {
       // Arrange
       broadcast.initWebSocket(mockWss);
 
@@ -175,7 +180,7 @@ describe('broadcast', () => {
       broadcast.broadcastStatus();
 
       // Assert
-      expect(mockTaskStatusStore.getAllStatus).toHaveBeenCalled();
+      expect(mockMetricsCollector.getSnapshot).toHaveBeenCalled();
     });
 
     it('should handle empty clients set gracefully', () => {
@@ -201,17 +206,20 @@ describe('broadcast', () => {
       const parsedData = JSON.parse(sentData);
 
       expect(parsedData).toHaveProperty('type', 'updateStatus');
-      expect(parsedData).toHaveProperty('pending', 5);
       expect(parsedData).toHaveProperty('success', 10);
       expect(parsedData).toHaveProperty('error', 2);
     });
 
-    it('should broadcast different status values correctly', () => {
+    it('should broadcast zero values correctly', () => {
       // Arrange
-      mockTaskStatusStore.getAllStatus.mockReturnValue({
-        pending: 0,
-        success: 0,
-        error: 0
+      mockMetricsCollector.getSnapshot.mockReturnValue({
+        counters: {
+          tasksReceived: 0,
+          tasksAccepted: 0,
+          tasksRejected: 0,
+          tasksCompleted: 0,
+          tasksFailed: 0,
+        }
       });
       broadcast.initWebSocket(mockWss);
 
@@ -221,7 +229,6 @@ describe('broadcast', () => {
       // Assert
       const expectedPayload = JSON.stringify({
         type: 'updateStatus',
-        pending: 0,
         success: 0,
         error: 0
       });

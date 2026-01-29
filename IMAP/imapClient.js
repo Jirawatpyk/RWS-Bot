@@ -5,6 +5,7 @@ const { logInfo, logSuccess, logFail, logProgress } = require('../Logs/logger');
 const { notifyGoogleChat } = require('../Logs/notifier');
 const { IMAPHealthMonitor } = require('./IMAPHealthMonitor');
 const { fetchNewEmails, initLastSeenUid, setHealthMonitor } = require('./fetcher');
+const { stateManager } = require('../State/stateManager');
 
 // Singleton IMAP health monitor
 const healthMonitor = new IMAPHealthMonitor(notifyGoogleChat);
@@ -98,6 +99,7 @@ async function connectToImapForMailbox(mailboxName, callback) {
     await client.mailboxOpen(mailboxName);
     logInfo(`📬 Mailbox "${mailboxName}" opened`);
     await initLastSeenUid(client, mailboxName, ALLOW_BACKFILL);
+    try { stateManager.updateIMAPStatus({ connected: true, mailboxes: MAILBOXES }); } catch (_) { /* non-critical */ }
 
     // แจ้งครั้งเดียวพอเมื่อระบบออนไลน์
     if (MAILBOXES.indexOf(mailboxName) === 0) {
@@ -121,6 +123,7 @@ async function connectToImapForMailbox(mailboxName, callback) {
       if (getHandled(mailboxName)) return;
       setHandled(mailboxName, true);
       logFail(`❌ IMAP error (${mailboxName}): ${err.message}`);
+      try { stateManager.updateIMAPStatus({ connected: false }); } catch (_) { /* non-critical */ }
       notifyGoogleChat(`❌ [Auto RWS] IMAP error (${mailboxName}): ${err.message}`);
       attemptReconnect(mailboxName, callback);
     });
@@ -129,6 +132,7 @@ async function connectToImapForMailbox(mailboxName, callback) {
       if (getHandled(mailboxName)) return;
       setHandled(mailboxName, true);
       logFail(`🔌 IMAP closed (${mailboxName})`);
+      try { stateManager.updateIMAPStatus({ connected: false }); } catch (_) { /* non-critical */ }
       attemptReconnect(mailboxName, callback);
     });
 
@@ -136,11 +140,13 @@ async function connectToImapForMailbox(mailboxName, callback) {
       if (getHandled(mailboxName)) return;
       setHandled(mailboxName, true);
       logFail(`🔴 IMAP ended by server (${mailboxName})`);
+      try { stateManager.updateIMAPStatus({ connected: false }); } catch (_) { /* non-critical */ }
       notifyGoogleChat(`🔴 [Auto RWS] IMAP ended (${mailboxName})`);
       attemptReconnect(mailboxName, callback);
     });
   } catch (err) {
     logFail(`❌ IMAP setup failed (${mailboxName}): ${err.message}`);
+    try { stateManager.updateIMAPStatus({ connected: false }); } catch (_) { /* non-critical */ }
     notifyGoogleChat(`❌ [Auto RWS] IMAP setup failed (${mailboxName}): ${err.message}`);
     attemptReconnect(mailboxName, callback);
   }
@@ -193,11 +199,13 @@ async function connectToImap(callback) {
 // -------------- utilities --------------
 function pauseImap() {
   isPaused = true;
+  try { stateManager.updateIMAPStatus({ paused: true }); } catch (_) { /* non-critical */ }
   logInfo('⏸️ IMAP paused');
 }
 
 function resumeImap() {
   isPaused = false;
+  try { stateManager.updateIMAPStatus({ paused: false }); } catch (_) { /* non-critical */ }
   logInfo('▶️ IMAP resumed');
 }
 

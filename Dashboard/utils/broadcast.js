@@ -11,14 +11,13 @@ function broadcastStatus() {
     console.warn("⚠️ WebSocket server not initialized, cannot broadcast.");
     return;
   }
-  const { getAllStatus } = require("../statusManager/taskStatusStore");
-  const { pending, success, error } = getAllStatus();
+  const { metricsCollector } = require("../../Metrics/metricsCollector");
+  const { counters } = metricsCollector.getSnapshot();
 
   const payload = JSON.stringify({
     type: "updateStatus",
-    pending,
-    success,
-    error
+    success: counters.tasksCompleted,
+    error: counters.tasksFailed
   });
 
   wss.clients.forEach((client) => {

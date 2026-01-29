@@ -42,5 +42,21 @@
     "nodemon": "^3.1.11",
     "playwright": "^1.58.0",
     "supertest": "^7.2.2"
+  },
+  "overrides": {
+    "google-spreadsheet": {
+      "axios": "^1.9.0"
+    },
+    "puppeteer": {
+      "ws": "^8.18.1",
+      "@puppeteer/browsers": {
+        "tar-fs": "^3.0.7"
+      }
+    },
+    "imap": {
+      "utf7": {
+        "semver": "^7.7.2"
+      }
+    }
   }
 }

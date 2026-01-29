@@ -27,7 +27,17 @@ async function writeCapacityLog(entry) {
     console.error("❌ writeCapacityLog failed:", err.message);
   }
 }
-const { getAllStatus } = require("./statusManager/taskStatusStore");
+/**
+ * Get task status counters from MetricsCollector (single source of truth).
+ * Maps MetricsCollector fields to legacy {success, error} format for WebSocket clients.
+ */
+function getTaskCounters() {
+  const { counters } = metricsCollector.getSnapshot();
+  return {
+    success: counters.tasksCompleted,
+    error: counters.tasksFailed,
+  };
+}
 const { logSuccess, logInfo } = require("../Logs/logger");
 const { stateManager } = require('../State/stateManager');
 const { StateSyncService } = require('../State/stateSyncService');
@@ -666,21 +676,24 @@ function broadcastToClients(data) {
 const stateSyncService = new StateSyncService(stateManager, broadcastToClients);
 
 function pushStatusUpdate() {
-  const status = getAllStatus();
-  broadcastToClients({ type: "updateStatus", ...status, imapPaused: isImapPaused() });
+  const counters = getTaskCounters();
+  broadcastToClients({ type: "updateStatus", ...counters, imapPaused: isImapPaused() });
 }
 
 wss.on("connection", (ws) => {
   logSuccess("✅ WebSocket connected");
 
-  const { pending, success, error } = getAllStatus();
+  const counters = getTaskCounters();
   ws.send(JSON.stringify({
     type: "updateStatus",
-    pending,
-    success,
-    error,
+    ...counters,
     imapPaused: isImapPaused()
   }));
+
+  // Send full centralized state snapshot to new client
+  stateSyncService.sendFullState((data) => {
+    ws.send(JSON.stringify(data));
+  });
 
   ws.on("message", (msg) => {
     try {
@@ -694,12 +707,10 @@ wss.on("connection", (ws) => {
 
       // Handle refresh request
       if (data.type === "refresh") {
-        const { pending, success, error } = getAllStatus();
+        const counters = getTaskCounters();
         ws.send(JSON.stringify({
           type: "updateStatus",
-          pending,
-          success,
-          error,
+          ...counters,
           imapPaused: isImapPaused()
         }));
         return;
@@ -711,12 +722,10 @@ wss.on("connection", (ws) => {
         } else {
           pauseImap();
         }
-        const { pending, success, error } = getAllStatus();
+        const counters = getTaskCounters();
         broadcastToClients({
           type: "updateStatus",
-          pending,
-          success,
-          error,
+          ...counters,
           imapPaused: isImapPaused()
         });
       }

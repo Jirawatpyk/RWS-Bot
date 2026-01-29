@@ -59,12 +59,21 @@ jest.mock('../../Task/taskReporter', () => {
   };
 });
 
-jest.mock('../../Dashboard/statusManager/taskStatusStore', () => ({
-  getAllStatus: jest.fn(() => ({
-    pending: 2,
-    success: 5,
-    error: 1
-  }))
+jest.mock('../../Metrics/metricsCollector', () => ({
+  metricsCollector: {
+    getSnapshot: jest.fn(() => ({
+      counters: {
+        tasksReceived: 8,
+        tasksAccepted: 7,
+        tasksRejected: 1,
+        tasksCompleted: 5,
+        tasksFailed: 1,
+      }
+    })),
+    updateBrowserPoolStatus: jest.fn(),
+    updateIMAPStatus: jest.fn(),
+    reset: jest.fn(),
+  }
 }));
 
 jest.mock('../../IMAP/imapClient', () => ({

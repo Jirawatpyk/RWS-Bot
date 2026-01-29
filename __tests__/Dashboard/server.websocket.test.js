@@ -60,12 +60,21 @@ jest.mock('../../Task/taskReporter', () => ({
   acceptedTasksPath: '/mock/path/acceptedTasks.json'
 }));
 
-jest.mock('../../Dashboard/statusManager/taskStatusStore', () => ({
-  getAllStatus: jest.fn(() => ({
-    pending: 2,
-    success: 5,
-    error: 1
-  }))
+jest.mock('../../Metrics/metricsCollector', () => ({
+  metricsCollector: {
+    getSnapshot: jest.fn(() => ({
+      counters: {
+        tasksReceived: 8,
+        tasksAccepted: 7,
+        tasksRejected: 1,
+        tasksCompleted: 5,
+        tasksFailed: 1,
+      }
+    })),
+    updateBrowserPoolStatus: jest.fn(),
+    updateIMAPStatus: jest.fn(),
+    reset: jest.fn(),
+  }
 }));
 
 jest.mock('../../IMAP/imapClient', () => ({
@@ -98,7 +107,7 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
     // Re-require mocked modules
     jest.mock('../../Task/CapacityTracker');
     jest.mock('../../Task/taskReporter');
-    jest.mock('../../Dashboard/statusManager/taskStatusStore');
+    jest.mock('../../Metrics/metricsCollector');
     jest.mock('../../IMAP/imapClient');
     jest.mock('../../Logs/logger');
 
@@ -156,13 +165,11 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
     });
 
     it('should send initial status on connection', (done) => {
-      const { getAllStatus } = require('../../Dashboard/statusManager/taskStatusStore');
+      const { metricsCollector } = require('../../Metrics/metricsCollector');
       const { isImapPaused } = require('../../IMAP/imapClient');
 
-      getAllStatus.mockReturnValue({
-        pending: 3,
-        success: 10,
-        error: 2
+      metricsCollector.getSnapshot.mockReturnValue({
+        counters: { tasksReceived: 15, tasksAccepted: 12, tasksRejected: 3, tasksCompleted: 10, tasksFailed: 2 }
       });
       isImapPaused.mockReturnValue(false);
 
@@ -172,7 +179,6 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
         const message = JSON.parse(data.toString());
 
         expect(message.type).toBe('updateStatus');
-        expect(message.pending).toBe(3);
         expect(message.success).toBe(10);
         expect(message.error).toBe(2);
         expect(message.imapPaused).toBe(false);
@@ -246,12 +252,10 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
     });
 
     it('should handle refresh message and send updated status', (done) => {
-      const { getAllStatus } = require('../../Dashboard/statusManager/taskStatusStore');
+      const { metricsCollector } = require('../../Metrics/metricsCollector');
 
-      getAllStatus.mockReturnValue({
-        pending: 5,
-        success: 15,
-        error: 3
+      metricsCollector.getSnapshot.mockReturnValue({
+        counters: { tasksReceived: 20, tasksAccepted: 18, tasksRejected: 2, tasksCompleted: 15, tasksFailed: 3 }
       });
 
       const client = new WebSocket(serverAddress);
@@ -271,7 +275,6 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
         } else if (messageCount === 2) {
           // Second message should be updated status
           expect(message.type).toBe('updateStatus');
-          expect(message.pending).toBe(5);
           expect(message.success).toBe(15);
           expect(message.error).toBe(3);
 
@@ -286,11 +289,13 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
     });
 
     it('should handle togglePause message and broadcast to all clients', (done) => {
-      const { pauseImap, isImapPaused, getAllStatus } = require('../../IMAP/imapClient');
-      const statusStore = require('../../Dashboard/statusManager/taskStatusStore');
+      const { pauseImap, isImapPaused } = require('../../IMAP/imapClient');
+      const { metricsCollector } = require('../../Metrics/metricsCollector');
 
       isImapPaused.mockReturnValue(false).mockReturnValueOnce(false).mockReturnValueOnce(true);
-      getAllStatus.mockReturnValue({ pending: 1, success: 2, error: 0 });
+      metricsCollector.getSnapshot.mockReturnValue({
+        counters: { tasksReceived: 3, tasksAccepted: 3, tasksRejected: 0, tasksCompleted: 2, tasksFailed: 0 }
+      });
 
       const client1 = new WebSocket(serverAddress);
       const client2 = new WebSocket(serverAddress);
@@ -519,12 +524,10 @@ describe.skip('Dashboard/server.js - WebSocket Tests', () => {
   describe('pushStatusUpdate', () => {
     it('should push status updates to all clients', (done) => {
       const { pushStatusUpdate } = require('../../Dashboard/server');
-      const { getAllStatus } = require('../../Dashboard/statusManager/taskStatusStore');
+      const { metricsCollector } = require('../../Metrics/metricsCollector');
 
-      getAllStatus.mockReturnValue({
-        pending: 7,
-        success: 20,
-        error: 3
+      metricsCollector.getSnapshot.mockReturnValue({
+        counters: { tasksReceived: 30, tasksAccepted: 27, tasksRejected: 3, tasksCompleted: 20, tasksFailed: 3 }
       });
 
       const client = new WebSocket(serverAddress);

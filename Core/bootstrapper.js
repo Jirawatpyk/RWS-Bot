@@ -20,6 +20,7 @@ const { MoraviaStatusSync } = require('../Features/moraviaStatusSync');
 const taskReporter = require('../Task/taskReporter');
 const { broadcastToClients, setStatusSync, setPostAcceptVerifier } = require('../Dashboard/server');
 const { syncCapacityWithTasks } = require('../Task/CapacityTracker');
+const { stateManager } = require('../State/stateManager');
 
 const MAX_LOGIN_RETRIES = RETRIES.LOGIN_SESSION;
 
@@ -48,6 +49,7 @@ class SystemBootstrapper {
    */
   async boot(onEmailReceived) {
     logBanner();
+    try { stateManager.setSystemStatus('initializing'); } catch (_) { /* non-critical */ }
     startTaskSchedule();
 
     // --- Step 1: Login ---
@@ -92,6 +94,14 @@ class SystemBootstrapper {
       });
       const poolStatus = getBrowserPoolStatus();
       logSuccess(`Browser pool ready: ${poolStatus.availableBrowsers}/${poolStatus.totalBrowsers} browsers available`);
+      try {
+        stateManager.setSystemStatus('ready');
+        stateManager.updateBrowserPool({
+          active: poolStatus.totalBrowsers - poolStatus.availableBrowsers,
+          total: poolStatus.totalBrowsers,
+          available: poolStatus.availableBrowsers,
+        });
+      } catch (_) { /* non-critical */ }
     } catch (err) {
       logFail(`Failed to initialize browser pool: ${err.message}`, true);
       process.exit(EXIT_CODES.ERROR_EXIT);
@@ -119,9 +129,11 @@ class SystemBootstrapper {
 
     // --- Step 5: Start IMAP listener ---
     startListeningEmails(onEmailReceived);
+    // Note: stateManager IMAP status is updated by imapClient.js on actual connection success
 
     // --- Step 6: Signal ready ---
     this.eventBus.emitSystemReady();
+    try { stateManager.setSystemStatus('running'); } catch (_) { /* non-critical */ }
 
     // --- Step 7: Start Moravia Status Sync polling ---
     if (STATUS_SYNC.ENABLED) {
@@ -154,6 +166,7 @@ class SystemBootstrapper {
     const { notify = true, exitCode = EXIT_CODES.NORMAL_EXIT } = options;
 
     logInfo(`Shutdown initiated (${reason})...`);
+    try { stateManager.setSystemStatus('shutting_down'); } catch (_) { /* non-critical */ }
 
     if (notify) {
       await notifyGoogleChat(`[Auto RWS] System shutdown initiated (${reason})`);
@@ -170,6 +183,7 @@ class SystemBootstrapper {
       logFail(`Error during shutdown: ${err.message}`);
     }
 
+    try { stateManager.saveToFile(); } catch (_) { /* non-critical */ }
     this.eventBus.emitSystemShutdown(reason);
     process.exit(exitCode);
   }
@@ -180,6 +194,10 @@ class SystemBootstrapper {
    */
   async restartForLoginExpired() {
     logFail('Login expired -> restarting system', true);
+    try {
+      stateManager.setLastError('Login expired');
+      stateManager.setSystemStatus('shutting_down');
+    } catch (_) { /* non-critical */ }
     await notifyGoogleChat('[Auto RWS] Login expired. Restarting system...');
 
     try {
@@ -188,6 +206,7 @@ class SystemBootstrapper {
       await cleanupFetcher();
     } catch { /* best-effort cleanup */ }
 
+    try { stateManager.saveToFile(); } catch (_) { /* non-critical */ }
     await new Promise(res => setTimeout(res, TIMEOUTS.MEDIUM_DELAY));
     process.exit(EXIT_CODES.LOGIN_EXPIRED);
   }
@@ -199,6 +218,10 @@ class SystemBootstrapper {
    */
   async handleFatalError(label, err) {
     logFail(`${label}:`, err);
+    try {
+      stateManager.setLastError(err || label);
+      stateManager.setSystemStatus('error');
+    } catch (_) { /* non-critical */ }
     await notifyGoogleChat(`[Auto RWS] ${label}: ${err?.message || err}`);
 
     try {
@@ -209,6 +232,7 @@ class SystemBootstrapper {
       await cleanupFetcher();
     } catch { /* best-effort */ }
 
+    try { stateManager.saveToFile(); } catch (_) { /* non-critical */ }
     await new Promise(res => setTimeout(res, TIMEOUTS.MEDIUM_DELAY));
     process.exit(EXIT_CODES.ERROR_EXIT);
   }

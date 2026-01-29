@@ -9,6 +9,7 @@ const customParseFormat = require('dayjs/plugin/customParseFormat');
 const isBusinessDay = require('./isBusinessDay');
 const { maxDailyCapacity: MAX_DAILY_CAPACITY } = require('../Config/configs');
 const { CAPACITY } = require('../Config/constants');
+const { stateManager } = require('../State/stateManager');
 
 dayjs.extend(isSameOrBefore);
 dayjs.extend(customParseFormat);
@@ -149,6 +150,7 @@ function getAvailableDates(requiredWords, deadlineStr, excludeToday = false) {
 }
 
 async function applyCapacity(plan) {
+  let snapshot;
   await withFileLock(CAPACITY_MAP_PATH, () => {
     capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
     for (const { date, amount } of plan) {
@@ -156,7 +158,9 @@ async function applyCapacity(plan) {
       capacityMap[date] += amount;
     }
     saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+    snapshot = { ...capacityMap };
   });
+  try { stateManager.setCapacityMap(snapshot); } catch (_) { /* non-critical */ }
 }
 
 function getReport() {
@@ -175,15 +179,19 @@ function getRemainingCapacity(date) {
 }
 
 async function adjustCapacity({ date, amount }) {
+  let snapshot;
   await withFileLock(CAPACITY_MAP_PATH, () => {
     capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
     if (!capacityMap[date]) capacityMap[date] = 0;
     capacityMap[date] = Math.max(0, capacityMap[date] + amount);
     saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+    snapshot = { ...capacityMap };
   });
+  try { stateManager.setCapacityMap(snapshot); } catch (_) { /* non-critical */ }
 }
 
 async function releaseCapacity(plan) {
+  let snapshot;
   await withFileLock(CAPACITY_MAP_PATH, () => {
     capacityMap = loadJSON(CAPACITY_MAP_PATH, {});
     for (const { date, amount } of plan) {
@@ -194,7 +202,9 @@ async function releaseCapacity(plan) {
       }
     }
     saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
+    snapshot = { ...capacityMap };
   });
+  try { stateManager.setCapacityMap(snapshot); } catch (_) { /* non-critical */ }
 }
 
 async function resetCapacityMap() {
@@ -202,6 +212,7 @@ async function resetCapacityMap() {
     capacityMap = {};
     saveJSONAtomic(CAPACITY_MAP_PATH, capacityMap);
   });
+  try { stateManager.setCapacityMap({}); } catch (_) { /* non-critical */ }
 }
 
 /**
@@ -254,6 +265,8 @@ async function syncCapacityWithTasks() {
 
     return { beforeCapacity, newCapacity, totalBefore, totalAfter };
   });
+
+  try { stateManager.setCapacityMap(result.newCapacity); } catch (_) { /* non-critical */ }
 
   // Cleanup dailyOverride วันเก่า (< today) -- separate concern, no lock needed
   const overrideMap = loadDailyOverride();

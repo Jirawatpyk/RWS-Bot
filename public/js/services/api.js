@@ -139,20 +139,43 @@ class ApiService {
   }
 
   /**
-   * Get daily override settings
-   * @returns {Promise<object>} - Override settings
+   * Get daily override settings.
+   * Backend stores { "date": number }, frontend expects { "date": { limit: number } }.
+   * @returns {Promise<object>} - Override settings in frontend format
    */
   async getOverride() {
-    return this.get(CONFIG.API.OVERRIDE);
+    const response = await this.get(CONFIG.API.OVERRIDE);
+    if (response && typeof response === 'object') {
+      const transformed = {};
+      for (const [date, value] of Object.entries(response)) {
+        if (typeof value === 'number') {
+          transformed[date] = { limit: value };
+        } else if (typeof value === 'object' && value !== null) {
+          transformed[date] = value;
+        }
+      }
+      return transformed;
+    }
+    return response;
   }
 
   /**
-   * Update daily override settings
-   * @param {object} data - Override data
+   * Update daily override settings.
+   * Frontend sends { "date": { limit: number } }, backend expects { "date": number }.
+   * @param {object} data - Override data in frontend format
    * @returns {Promise<object>} - Updated settings
    */
   async setOverride(data) {
-    return this.post(CONFIG.API.OVERRIDE, data);
+    // Normalize frontend format to backend format
+    const normalized = {};
+    for (const [date, value] of Object.entries(data)) {
+      if (typeof value === 'object' && value !== null && typeof value.limit === 'number') {
+        normalized[date] = value.limit;
+      } else if (typeof value === 'number') {
+        normalized[date] = value;
+      }
+    }
+    return this.post(CONFIG.API.OVERRIDE, normalized);
   }
 
   /**

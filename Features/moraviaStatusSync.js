@@ -15,6 +15,7 @@
 
 const { logInfo, logSuccess, logFail } = require('../Logs/logger');
 const { STATUS_SYNC } = require('../Config/constants');
+const { stateManager } = require('../State/stateManager');
 
 class MoraviaStatusSync {
   /**
@@ -99,6 +100,11 @@ class MoraviaStatusSync {
 
       const completedCount = result.completedCount || 0;
       const onHoldCount = result.onHoldCount || 0;
+
+      // Sync active tasks to centralized StateManager
+      if (Array.isArray(result.activeTasks)) {
+        try { stateManager.setActiveTasks(result.activeTasks); } catch (_) { /* non-critical */ }
+      }
 
       // Sync capacity with remaining tasks (recalculate from allocationPlan)
       let capacitySyncResult = null;
