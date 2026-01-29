@@ -753,48 +753,7 @@ describe('Dashboard/server.js - Task Report API Logic', () => {
       });
     });
 
-    describe('POST /api/capacity/sync', () => {
-      it('should sync capacity with tasks and return result', async () => {
-        const { syncCapacityWithTasks } = require('../../Task/CapacityTracker');
-        syncCapacityWithTasks.mockResolvedValue({
-          success: true,
-          after: {
-            '2026-01-25': 5000,
-            '2026-01-26': 3000
-          },
-          diff: 2000,
-          deletedOverrides: ['2026-01-24']
-        });
-
-        const response = await request(app)
-          .post('/api/capacity/sync')
-          .send({});
-
-        expect(response.status).toBe(200);
-        expect(response.body.success).toBe(true);
-        expect(response.body.after).toEqual({
-          '2026-01-25': 5000,
-          '2026-01-26': 3000
-        });
-        expect(response.body.diff).toBe(2000);
-        expect(syncCapacityWithTasks).toHaveBeenCalled();
-      });
-
-      it('should handle sync errors gracefully', async () => {
-        const { syncCapacityWithTasks } = require('../../Task/CapacityTracker');
-        syncCapacityWithTasks.mockRejectedValue(new Error('Sync failed'));
-
-        const response = await request(app)
-          .post('/api/capacity/sync')
-          .send({});
-
-        expect(response.status).toBe(500);
-        expect(response.body).toEqual({
-          success: false,
-          error: 'Sync failed'
-        });
-      });
-    });
+    // POST /api/capacity/sync removed — capacity sync is now part of /api/tasks/refresh via MoraviaStatusSync
 
     describe('POST /api/release', () => {
       it('should release capacity for given plan', async () => {

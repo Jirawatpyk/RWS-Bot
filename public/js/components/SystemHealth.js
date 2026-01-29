@@ -262,6 +262,8 @@ class SystemHealth {
     const d = data || {};
     const lastSync = d.lastSyncTime || d.lastSync || d.timestamp;
     const isRunning = d.isRunning || d.isSyncing || false;
+    const syncCount = d.syncCount || 0;
+    const isPolling = d.isPolling || false;
     const lastSyncText = lastSync ? dayjs(lastSync).format('HH:mm:ss') : '--:--:--';
 
     return `
@@ -274,12 +276,17 @@ class SystemHealth {
         <div class="health-sub-row">
           <span class="text-muted">Status</span>
           <span class="badge ${isRunning ? 'badge-info' : 'badge-success'}" id="sync-status-badge">
-            ${isRunning ? 'Running' : 'Idle'}
+            ${isRunning ? 'Syncing' : 'Idle'}
           </span>
         </div>
-        <button class="btn btn-sm btn-secondary w-full mt-sm" id="btn-trigger-sync" ${isRunning ? 'disabled' : ''}>
-          ${ICONS.refresh} Trigger Sync
-        </button>
+        <div class="health-sub-row">
+          <span class="text-muted">Cycles</span>
+          <span>${syncCount}</span>
+        </div>
+        <div class="health-sub-row">
+          <span class="text-muted">Auto-poll</span>
+          <span class="badge ${isPolling ? 'badge-success' : 'badge-warning'}">${isPolling ? 'Active' : 'Off'}</span>
+        </div>
       </div>
     `;
   }
@@ -328,10 +335,8 @@ class SystemHealth {
     const badge = document.getElementById('sync-status-badge');
     if (badge) {
       badge.className = `badge ${isRunning ? 'badge-info' : 'badge-success'}`;
-      badge.textContent = isRunning ? 'Running' : 'Idle';
+      badge.textContent = isRunning ? 'Syncing' : 'Idle';
     }
-    const btn = document.getElementById('btn-trigger-sync');
-    if (btn) btn.disabled = isRunning;
   }
 
   _updateVerificationSection() {
@@ -363,23 +368,6 @@ class SystemHealth {
   bindEvents() {
     document.getElementById('btn-health-refresh')?.addEventListener('click', () => {
       this.loadData();
-    });
-
-    document.getElementById('btn-trigger-sync')?.addEventListener('click', async () => {
-      const btn = document.getElementById('btn-trigger-sync');
-      if (btn) btn.disabled = true;
-      try {
-        await api.post('/api/sync/trigger');
-        document.dispatchEvent(new CustomEvent('toast:show', {
-          detail: { type: 'success', message: 'Sync triggered successfully' }
-        }));
-        setTimeout(() => this.loadData(), 2000);
-      } catch (err) {
-        document.dispatchEvent(new CustomEvent('toast:show', {
-          detail: { type: 'error', message: 'Failed to trigger sync' }
-        }));
-        if (btn) btn.disabled = false;
-      }
     });
   }
 

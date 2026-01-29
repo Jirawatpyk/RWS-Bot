@@ -213,14 +213,6 @@ class ApiService {
     }));
   }
 
-  /**
-   * Get daily override JSON file
-   * @returns {Promise<object>} - Daily override data
-   */
-  async getDailyOverride() {
-    return this.get(CONFIG.API.DAILY_OVERRIDE);
-  }
-
   // ============================================
   // Phase 2 API Methods
   // ============================================
@@ -252,9 +244,7 @@ class ApiService {
   async retryTask(id) { return this.post(`/api/queue/retry/${id}`); }
   async cleanupQueue(olderThanDays = 7) { return this.post('/api/queue/cleanup', { olderThanDays }); }
 
-  async getCapacityAnalysis(days) { return this.get(CONFIG.API.CAPACITY_ANALYSIS, days ? { days } : {}); }
-  async getCapacitySuggestions() { return this.get(CONFIG.API.CAPACITY_SUGGESTIONS); }
-  async getCapacitySummary() { return this.get(CONFIG.API.CAPACITY_SUMMARY); }
+  async getCapacityInsights(days) { return this.get(CONFIG.API.CAPACITY_INSIGHTS, days ? { days } : {}); }
 }
 
 /**

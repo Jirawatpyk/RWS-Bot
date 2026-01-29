@@ -17,8 +17,6 @@ export const CONFIG = {
     ADJUST: '/api/adjust',
     CLEANUP: '/api/cleanup',
     ACCEPTED_TASKS: '/api/tasks',
-    DAILY_OVERRIDE: '/dailyOverride.json',
-
     // Phase 2 APIs
     HEALTH_BROWSER: '/api/health/browser',
     HEALTH_IMAP: '/api/health/imap',
@@ -34,9 +32,7 @@ export const CONFIG = {
     HOLIDAYS: '/api/holidays',
     QUEUE_STATUS: '/api/queue/status',
     QUEUE_RECENT: '/api/queue/recent',
-    CAPACITY_ANALYSIS: '/api/capacity/analysis',
-    CAPACITY_SUGGESTIONS: '/api/capacity/suggestions',
-    CAPACITY_SUMMARY: '/api/capacity/summary'
+    CAPACITY_INSIGHTS: '/api/capacity/insights'
   },
 
   // WebSocket

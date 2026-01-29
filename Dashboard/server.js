@@ -130,23 +130,6 @@ app.post('/api/capacity/reset', async (req, res) => {
   res.json({ success: true });
 });
 
-// POST sync capacity with tasks
-app.post('/api/capacity/sync', async (req, res) => {
-  try {
-    const result = await syncCapacityWithTasks();
-    if (result.success) {
-      // Broadcast ไปทุก client
-      const dates = Object.keys(result.after);
-      dates.forEach(date => {
-        broadcastToClients({ type: 'capacityUpdated', date });
-      });
-    }
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 // POST /api/release
 app.post('/api/release', async (req, res) => {
   const plan = req.body; // [{ date, amount }]
@@ -165,40 +148,15 @@ app.post('/api/adjust', async (req, res) => {
 
 /* ========================= Capacity Learning API ========================= */
 // IMPORTANT: Static routes MUST be registered before parameterized /:date route
-// to prevent Express from matching "/api/capacity/analysis" as { date: "analysis" }
+// to prevent Express from matching "/api/capacity/insights" as { date: "insights" }
 
-// GET /api/capacity/analysis — full analysis of past performance
-app.get('/api/capacity/analysis', (req, res) => {
+// GET /api/capacity/insights — unified: analysis + suggestions + summary (single call)
+app.get('/api/capacity/insights', (req, res) => {
   try {
     const days = parseInt(req.query.days, 10) || 30;
     const analysis = capacityLearner.analyzePastPerformance(days);
-    res.json(analysis);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/capacity/suggestions — suggestions only (lightweight)
-app.get('/api/capacity/suggestions', (req, res) => {
-  try {
-    const days = parseInt(req.query.days, 10) || 30;
-    const analysis = capacityLearner.analyzePastPerformance(days);
-    res.json({
-      period: analysis.period,
-      totalDays: analysis.totalDays,
-      avgUtilization: analysis.avgUtilization,
-      suggestions: analysis.suggestions,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/capacity/summary — dashboard-friendly summary with recommendation
-app.get('/api/capacity/summary', (req, res) => {
-  try {
     const summary = capacityLearner.getSummary();
-    res.json(summary);
+    res.json({ analysis, summary, suggestions: analysis.suggestions || {} });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -244,63 +202,52 @@ app.get('/api/metrics', (req, res) => {
   res.json(metricsCollector.getSnapshot());
 });
 
-// POST /api/tasks/refresh - ดึงจาก Sheet + เคลียร์ completed/on-hold + sync capacity (รวมทุกอย่างเป็น API เดียว)
+// POST /api/tasks/refresh - Unified sync: delegates to MoraviaStatusSync (single entry point)
+// MoraviaStatusSync.sync() handles: loadAndFilterTasks + syncCapacityWithTasks + broadcast + notifications
 app.post('/api/tasks/refresh', async (req, res) => {
-  let activeTasks = [];
-  let completedCount = 0;
-  let onHoldCount = 0;
-  let summary = null;
-  let syncResult = { success: false, after: {}, diff: 0, deletedOverrides: [] };
-  const errors = [];
-
-  // Step 1: Query Sheet + ลบ completed/on-hold tasks
   try {
-    const result = await loadAndFilterTasks();
-    activeTasks = result.activeTasks;
-    completedCount = result.completedCount;
-    onHoldCount = result.onHoldCount || 0;
-    summary = summarizeTasks(activeTasks);
-  } catch (err) {
-    errors.push({ step: 'loadAndFilterTasks', error: err.message });
-  }
+    let result;
 
-  // Step 2: Sync capacity กับ tasks (คำนวณใหม่จาก allocationPlan)
-  try {
-    syncResult = await syncCapacityWithTasks();
-  } catch (err) {
-    errors.push({ step: 'syncCapacityWithTasks', error: err.message });
-  }
+    if (_moraviaStatusSync) {
+      // Use MoraviaStatusSync as single entry point (has _syncing guard)
+      result = await _moraviaStatusSync.sync();
+      if (result === null) {
+        return res.status(409).json({ error: 'Sync already in progress' });
+      }
+    } else {
+      // Fallback: direct call if StatusSync not initialized
+      const filterResult = await loadAndFilterTasks();
+      let capacitySyncResult = null;
+      try { capacitySyncResult = await syncCapacityWithTasks(); } catch (_) {}
+      result = {
+        success: true,
+        activeTasksList: filterResult.activeTasks,
+        activeTasks: filterResult.activeTasks.length,
+        completedCount: filterResult.completedCount || 0,
+        onHoldCount: filterResult.onHoldCount || 0,
+        capacity: capacitySyncResult
+      };
+    }
 
-  // Step 3: Broadcast ไปทุก client (ทำแม้มี error บางส่วน)
-  if (completedCount > 0 || onHoldCount > 0) {
-    broadcastToClients({
-      type: 'tasksUpdated',
-      completedCount,
-      onHoldCount
+    const activeTasks = result.activeTasksList || [];
+    const summary = summarizeTasks(Array.isArray(activeTasks) ? activeTasks : []);
+    const capResult = result.capacity || {};
+
+    res.json({
+      success: result.success,
+      tasks: activeTasks,
+      summary,
+      completedCount: result.completedCount || 0,
+      onHoldCount: result.onHoldCount || 0,
+      capacity: capResult.after || {},
+      synced: capResult.success || false,
+      syncDiff: capResult.diff || 0,
+      deletedOverrides: capResult.deletedOverrides || [],
+      lastUpdated: new Date().toISOString()
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
-
-  // Broadcast capacityUpdated ถ้ามีการเปลี่ยนแปลง
-  if (syncResult.success && syncResult.diff !== 0) {
-    const dates = Object.keys(syncResult.after || {});
-    dates.forEach(date => {
-      broadcastToClients({ type: 'capacityUpdated', date });
-    });
-  }
-
-  res.json({
-    success: errors.length === 0,
-    tasks: activeTasks,
-    summary,
-    completedCount,
-    onHoldCount,
-    capacity: syncResult?.after ?? {},
-    synced: syncResult.success,
-    syncDiff: syncResult?.diff ?? 0,
-    deletedOverrides: syncResult?.deletedOverrides ?? [],
-    lastUpdated: new Date().toISOString(),
-    errors: errors.length > 0 ? errors : undefined
-  });
 });
 
 async function cleanupOldCapacityAndOverride(datesToDelete = null) {

@@ -28,6 +28,7 @@ class App {
   constructor() {
     this.components = {};
     this.isInitialized = false;
+    this._refreshing = false;
 
     // Setup global error handlers
     this.setupErrorHandlers();
@@ -188,7 +189,7 @@ class App {
       });
 
       // Calculate initial status from tasks
-      this.updateStatusFromTasks();
+
 
       console.log('[App] Initial data loaded');
 
@@ -276,66 +277,48 @@ class App {
    * Refresh all data
    */
   async refresh() {
+    if (this._refreshing) return;
+    this._refreshing = true;
     console.log('[App] Refreshing data...');
 
     try {
-      // Request status refresh via WebSocket
-      ws.requestRefresh();
-
-      // Call POST /api/tasks/refresh to sync with Google Sheets
-      // This removes completed/on-hold tasks and recalculates capacity
+      // Unified sync: POST /api/tasks/refresh handles Sheet sync + capacity sync
+      // Returns tasks directly — no need for separate getAcceptedTasks() call
       const [refreshResult, capacityData, overrideData] = await Promise.all([
         api.refreshTasks().catch((err) => {
-          console.warn('[App] refreshTasks failed, falling back to getAcceptedTasks:', err.message);
+          console.warn('[App] refreshTasks failed:', err.message);
           return null;
         }),
         api.getCapacity().catch(() => null),
         api.getOverride().catch(() => null)
       ]);
 
-      // Use refreshTasks result if available, otherwise fallback to read-only
-      let tasksData = refreshResult?.tasks;
-      if (!tasksData) {
-        tasksData = await api.getAcceptedTasks().catch(() => null);
-      }
-
-      if (capacityData) {
-        store.set('capacity', capacityData);
-      }
-
-      if (tasksData && Array.isArray(tasksData)) {
-        store.set('tasks', tasksData);
-      }
-
-      if (overrideData) {
-        store.set('override', overrideData);
-      }
-
       if (refreshResult?.completedCount > 0 || refreshResult?.onHoldCount > 0) {
         console.log(`[App] Removed ${refreshResult.completedCount} completed, ${refreshResult.onHoldCount} on-hold tasks`);
       }
 
-      store.set('lastSync', new Date().toISOString());
-      this.updateStatusFromTasks();
+      // Use tasks from refresh response directly (avoids reading acceptedTasks.json twice)
+      const tasksData = refreshResult?.tasks;
+
+      // Batch store update
+      const updates = { lastSync: new Date().toISOString() };
+      if (capacityData) updates.capacity = capacityData;
+      if (tasksData && Array.isArray(tasksData)) updates.tasks = tasksData;
+      if (overrideData) updates.override = overrideData;
+      store.update(updates);
+
+
+
+      // Request server-side counts (Accepted/Failed) via WebSocket
+      ws.requestRefresh();
 
       console.log('[App] Data refreshed');
 
     } catch (error) {
       console.error('[App] Refresh failed:', error);
+    } finally {
+      this._refreshing = false;
     }
-  }
-
-  /**
-   * Update status counts from tasks
-   */
-  updateStatusFromTasks() {
-    const tasks = store.get('tasks') || [];
-    const currentStatus = store.get('status') || {};
-
-    store.set('status', {
-      ...currentStatus,
-      pending: tasks.length
-    });
   }
 
   /**

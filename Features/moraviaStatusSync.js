@@ -24,7 +24,7 @@ class MoraviaStatusSync {
    * @param {Function} deps.notifier - notifyGoogleChat(message)
    * @param {import('../Core/eventBus').SystemEventBus} deps.eventBus
    */
-  constructor({ taskReporter, broadcastToClients, notifier, eventBus }) {
+  constructor({ taskReporter, broadcastToClients, notifier, eventBus, capacitySync }) {
     if (!taskReporter || typeof taskReporter.loadAndFilterTasks !== 'function') {
       throw new Error('MoraviaStatusSync requires taskReporter with loadAndFilterTasks()');
     }
@@ -36,6 +36,7 @@ class MoraviaStatusSync {
     this.broadcast = broadcastToClients;
     this.notifier = notifier;
     this.eventBus = eventBus;
+    this.capacitySync = capacitySync || null;
 
     this._interval = null;
     this._syncing = false;
@@ -99,10 +100,20 @@ class MoraviaStatusSync {
       const completedCount = result.completedCount || 0;
       const onHoldCount = result.onHoldCount || 0;
 
+      // Sync capacity with remaining tasks (recalculate from allocationPlan)
+      let capacitySyncResult = null;
+      if (typeof this.capacitySync === 'function') {
+        try {
+          capacitySyncResult = await this.capacitySync();
+        } catch (capErr) {
+          logFail(`[StatusSync] Capacity sync failed: ${capErr.message}`);
+        }
+      }
+
       // Broadcast to WebSocket clients when there are status changes
       if (completedCount > 0 || onHoldCount > 0) {
         this.broadcast({
-          type: 'statusSync',
+          type: 'tasksUpdated',
           completedCount,
           onHoldCount,
           activeTasks: result.activeTasks.length,
@@ -131,12 +142,21 @@ class MoraviaStatusSync {
         }
       }
 
+      // Broadcast capacity update if changed
+      if (capacitySyncResult?.success && capacitySyncResult.diff !== 0) {
+        const dates = Object.keys(capacitySyncResult.after || {});
+        dates.forEach(date => {
+          this.broadcast({ type: 'capacityUpdated', date });
+        });
+      }
+
       this.lastSyncResult = {
         timestamp: Date.now(),
         syncId,
         activeTasks: result.activeTasks.length,
         completedCount,
         onHoldCount,
+        capacity: capacitySyncResult,
         success: true
       };
 
@@ -145,7 +165,12 @@ class MoraviaStatusSync {
         `active=${result.activeTasks.length}, completed=${completedCount}, onHold=${onHoldCount}`
       );
 
-      return this.lastSyncResult;
+      // Return full data for API callers (includes tasks array)
+      // lastSyncResult stores only count to avoid memory waste
+      return {
+        ...this.lastSyncResult,
+        activeTasksList: result.activeTasks
+      };
 
     } catch (err) {
       this.lastSyncResult = {

@@ -19,6 +19,7 @@ const { metricsCollector } = require('../Metrics/metricsCollector');
 const { MoraviaStatusSync } = require('../Features/moraviaStatusSync');
 const taskReporter = require('../Task/taskReporter');
 const { broadcastToClients, setStatusSync, setPostAcceptVerifier } = require('../Dashboard/server');
+const { syncCapacityWithTasks } = require('../Task/CapacityTracker');
 
 const MAX_LOGIN_RETRIES = RETRIES.LOGIN_SESSION;
 
@@ -129,7 +130,8 @@ class SystemBootstrapper {
           taskReporter,
           broadcastToClients,
           notifier: notifyGoogleChat,
-          eventBus: this.eventBus
+          eventBus: this.eventBus,
+          capacitySync: syncCapacityWithTasks
         });
         setStatusSync(this.statusSync);
         this.statusSync.startPolling(STATUS_SYNC.POLLING_INTERVAL);

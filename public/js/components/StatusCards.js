@@ -15,8 +15,14 @@ class StatusCards {
       return;
     }
 
-    // Subscribe to store updates
-    store.subscribe('status', () => this.render());
+    // Subscribe to store updates (debounce to avoid double-render)
+    this._renderTimer = null;
+    const scheduleRender = () => {
+      clearTimeout(this._renderTimer);
+      this._renderTimer = setTimeout(() => this.render(), 16);
+    };
+    store.subscribe('status', scheduleRender);
+    store.subscribe('tasks', scheduleRender);
   }
 
   /**
@@ -26,7 +32,9 @@ class StatusCards {
     if (!this.container) return;
 
     const status = store.get('status') || {};
-    const { pending = 0, success = 0, error = 0, imapPaused = false, imapStatus = 'Running' } = status;
+    const tasks = store.get('tasks') || [];
+    const { success = 0, error = 0, imapPaused = false, imapStatus = 'Running' } = status;
+    const pending = tasks.length;
 
     this.container.innerHTML = `
       <div class="status-cards">

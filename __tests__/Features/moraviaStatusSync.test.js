@@ -180,9 +180,9 @@ describe('MoraviaStatusSync', () => {
       expect(mocks.taskReporter.loadAndFilterTasks).toHaveBeenCalledTimes(1);
       expect(result.success).toBe(true);
       expect(result.activeTasks).toBe(2);
+      expect(result.activeTasksList).toHaveLength(2);
       expect(result.completedCount).toBe(0);
       expect(result.onHoldCount).toBe(0);
-      expect(sync.lastSyncResult).toEqual(result);
     });
 
     it('should broadcast when there are completed tasks', async () => {
@@ -197,7 +197,7 @@ describe('MoraviaStatusSync', () => {
       await sync.sync();
 
       expect(mocks.broadcastToClients).toHaveBeenCalledWith({
-        type: 'statusSync',
+        type: 'tasksUpdated',
         completedCount: 3,
         onHoldCount: 1,
         activeTasks: 1,

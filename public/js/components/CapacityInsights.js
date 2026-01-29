@@ -20,24 +20,15 @@ class CapacityInsights {
     this._loading = false;
     this._unsubscribers = [];
 
-    this._unsubscribers.push(store.subscribe('capacityAnalysis', () => this.render()));
-    this._unsubscribers.push(store.subscribe('capacitySuggestions', () => this.render()));
-    this._unsubscribers.push(store.subscribe('capacitySummary', () => this.render()));
+    this._unsubscribers.push(store.subscribe('capacityInsights', () => this.render()));
   }
 
   async loadData() {
     if (this._loading) return;
     this._loading = true;
     try {
-      const [analysis, suggestions, summary] = await Promise.all([
-        api.get('/api/capacity/analysis').catch(() => null),
-        api.get('/api/capacity/suggestions').catch(() => null),
-        api.get('/api/capacity/summary').catch(() => null),
-      ]);
-
-      store.set('capacityAnalysis', analysis, true);
-      store.set('capacitySuggestions', suggestions, true);
-      store.set('capacitySummary', summary, true);
+      const insights = await api.getCapacityInsights().catch(() => null);
+      store.set('capacityInsights', insights);
       this.render();
     } catch (err) {
       console.warn('[CapacityInsights] loadData failed:', err);
@@ -49,11 +40,10 @@ class CapacityInsights {
   render() {
     if (!this.container) return;
 
-    const summary = store.get('capacitySummary') || {};
-    const analysisRaw = store.get('capacityAnalysis') || {};
-    const suggestions = store.get('capacitySuggestions') || {};
-    // summary.analysis is nested, merge with direct analysis response
-    const analysis = { ...analysisRaw, ...(summary.analysis || {}) };
+    const insights = store.get('capacityInsights') || {};
+    const summary = insights.summary || {};
+    const analysis = { ...(insights.analysis || {}), ...(summary.analysis || {}) };
+    const suggestions = insights.suggestions ? { suggestions: insights.suggestions } : {};
 
     const recommendation = summary.recommendation || analysis.recommendation || 'No data';
     const confidence = analysis.confidence || 0;

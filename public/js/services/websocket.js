@@ -231,7 +231,9 @@ class WebSocketService {
    */
   handleStatusUpdate(payload) {
     const currentStatus = store.get('status') || {};
-    store.set('status', { ...currentStatus, ...payload });
+    // Remove server's pending counter — StatusCards reads tasks.length directly
+    const { pending, ...rest } = payload;
+    store.set('status', { ...currentStatus, ...rest });
   }
 
   /**
