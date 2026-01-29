@@ -14,7 +14,7 @@ const { trackAmountWords } = require('../Task/wordQuotaTracker');
 const { markStatusWithRetry } = require('../Sheets/markStatusByOrderId');
 const runTaskInNewBrowser = require('../Task/runTaskInNewBrowser');
 const { getBrowserPoolStatus } = require('../Task/runTaskInNewBrowser');
-const { pushStatusUpdate, broadcastToClients } = require('../Dashboard/server');
+const { pushStatusUpdate, broadcastToClients, setTaskQueue } = require('../Dashboard/server');
 const { incrementStatus } = require('../Dashboard/statusManager/taskStatusStore');
 const { defaultConcurrency } = require('../Config/configs');
 const { logSuccess, logFail, logInfo, logProgress } = require('../Logs/logger');
@@ -172,6 +172,9 @@ class TaskHandler {
         logInfo(`TaskQueue Idle | Pool Status: ${poolStatus.availableBrowsers}/${poolStatus.totalBrowsers} available`);
       },
     });
+
+    // Inject queue reference for Dashboard API
+    setTaskQueue(this.queue);
   }
 
   // --------------------------------------------------------- Public API

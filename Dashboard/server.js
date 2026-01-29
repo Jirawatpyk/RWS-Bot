@@ -400,6 +400,17 @@ app.get('/api/working-hours', (req, res) => {
   }
 });
 
+// GET /api/working-hours/overtime — get all overtime schedules
+// MUST be defined BEFORE /api/working-hours/:date to avoid matching "overtime" as date param
+app.get('/api/working-hours/overtime', (req, res) => {
+  try {
+    const schedule = workingHoursManager.getOvertimeSchedule();
+    res.json(schedule);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/working-hours/:date — working hours for a specific date
 app.get('/api/working-hours/:date', (req, res) => {
   try {
@@ -438,16 +449,6 @@ app.delete('/api/working-hours/overtime/:date', (req, res) => {
       broadcastToClients({ type: 'workingHoursUpdated', date });
     }
     res.json({ success: true, removed });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GET /api/working-hours/overtime — get all overtime schedules
-app.get('/api/working-hours/overtime', (req, res) => {
-  try {
-    const schedule = workingHoursManager.getOvertimeSchedule();
-    res.json(schedule);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

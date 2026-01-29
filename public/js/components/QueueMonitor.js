@@ -61,15 +61,17 @@ class QueueMonitor {
     if (!this.container) return;
 
     const rawStatus = store.get('queueStatus') || {};
-    // API may wrap in { persistent: {...} } or return flat
+    // API may wrap in { persistent: {...} }, { inMemory: {...} }, or return flat
     const status = rawStatus.persistent || rawStatus;
+    const inMem = rawStatus.inMemory || {};
     const recentData = store.get('queueRecent') || {};
     const tasks = recentData.tasks || recentData || [];
     const taskArr = Array.isArray(tasks) ? tasks : [];
+    const queueEnabled = rawStatus.enabled !== false;
 
     const total = status.total || 0;
-    const pending = status.pending || 0;
-    const processing = status.processing || status.inProgress || 0;
+    const pending = status.pending || inMem.queued || 0;
+    const processing = status.processing || status.inProgress || inMem.processing || 0;
     const completed = status.completed || 0;
     const failed = status.failed || 0;
     const utilization = total > 0 ? Math.round(((completed + failed) / total) * 100) : 0;
@@ -85,7 +87,7 @@ class QueueMonitor {
     this.container.innerHTML = `
       <div class="queue-monitor">
         <div class="queue-monitor-header">
-          <div class="queue-monitor-title">Queue Monitor</div>
+          <div class="queue-monitor-title">Queue Monitor ${!queueEnabled ? '<span class="badge badge-warning">Not Ready</span>' : ''}</div>
           <div class="queue-monitor-actions">
             <button class="btn btn-sm btn-danger" id="btn-queue-cleanup" data-tooltip="Remove old completed/failed tasks">
               ${ICONS.delete} Cleanup

@@ -50,13 +50,15 @@ class CapacityInsights {
     if (!this.container) return;
 
     const summary = store.get('capacitySummary') || {};
-    const analysis = store.get('capacityAnalysis') || {};
+    const analysisRaw = store.get('capacityAnalysis') || {};
     const suggestions = store.get('capacitySuggestions') || {};
+    // summary.analysis is nested, merge with direct analysis response
+    const analysis = { ...analysisRaw, ...(summary.analysis || {}) };
 
     const recommendation = summary.recommendation || analysis.recommendation || 'No data';
-    const confidence = summary.confidence || analysis.confidence || 0;
+    const confidence = analysis.confidence || 0;
     // API returns avgDailyWords (not avgWordsPerDay)
-    const avgWords = analysis.avgWordsPerDay || analysis.avgDailyWords || analysis.averageDaily || 0;
+    const avgWords = analysis.avgDailyWords || analysis.avgWordsPerDay || analysis.averageDaily || 0;
     const trend = analysis.trend || analysis.trendDirection || 'stable';
     // peakDay may be an object { date, allocated, count, utilization } or a string
     const peakDayRaw = analysis.peakDay || '-';

@@ -138,7 +138,9 @@ class SystemHealth {
     const health = d.health || {};
     const connected = conn.connected || conn.totalConnections > 0 || false;
     const rawMailboxes = conn.mailboxes || conn.mailboxCount || 0;
-    const mailboxes = Array.isArray(rawMailboxes) ? rawMailboxes.length : rawMailboxes;
+    const mailboxes = Array.isArray(rawMailboxes)
+      ? rawMailboxes.map(m => m.replace(/^.*\//, '')).join(', ')
+      : rawMailboxes;
     const reconnects = conn.totalReconnects || health.totalReconnectsTracked || 0;
     const paused = conn.isPaused || false;
     const statusClass = paused ? 'connecting' : (connected ? 'online' : 'offline');
@@ -285,11 +287,12 @@ class SystemHealth {
   _verificationSection(data) {
     const d = data || {};
     const pending = d.pendingCount || d.queueLength || d.pending || 0;
-    const rawResults = d.recentResults || d.results || [];
-    // API may return lastVerification (single object) instead of array
-    const results = Array.isArray(rawResults) ? rawResults : [];
-    const passCount = results.filter(r => r.verified === true || r.status === 'passed').length;
-    const failCount = results.filter(r => r.verified === false || r.status === 'failed').length;
+    const completed = d.completed || 0;
+    const isProcessing = d.processing || false;
+    // lastVerification is single object, show its status
+    const last = d.lastVerification || null;
+    const lastStatus = last ? (last.verified ? 'Passed' : 'Failed') : '-';
+    const lastOrder = last ? last.orderId : '-';
 
     return `
       <div class="health-sub-panel" id="verification-section">
@@ -299,12 +302,16 @@ class SystemHealth {
           <span class="badge badge-pending">${pending}</span>
         </div>
         <div class="health-sub-row">
-          <span class="text-muted">Passed</span>
-          <span class="text-success">${passCount}</span>
+          <span class="text-muted">Completed</span>
+          <span class="text-success">${completed}</span>
         </div>
         <div class="health-sub-row">
-          <span class="text-muted">Failed</span>
-          <span class="text-error">${failCount}</span>
+          <span class="text-muted">Processing</span>
+          <span class="${isProcessing ? 'text-info' : 'text-muted'}">${isProcessing ? 'Yes' : 'No'}</span>
+        </div>
+        <div class="health-sub-row">
+          <span class="text-muted">Last</span>
+          <span class="${last?.verified ? 'text-success' : 'text-muted'}" data-tooltip="${lastOrder}">${lastStatus}</span>
         </div>
       </div>
     `;
@@ -330,19 +337,27 @@ class SystemHealth {
   _updateVerificationSection() {
     const el = document.getElementById('verification-section');
     if (!el) return;
-    const data = store.get('verificationStatus') || {};
-    const pending = data.pendingCount || data.queueLength || data.pending || 0;
-    const rawResults = data.recentResults || data.results || [];
-    const results = Array.isArray(rawResults) ? rawResults : [];
-    const passCount = results.filter(r => r.verified === true || r.status === 'passed').length;
-    const failCount = results.filter(r => r.verified === false || r.status === 'failed').length;
+    const d = store.get('verificationStatus') || {};
+    const pending = d.pendingCount || d.queueLength || d.pending || 0;
+    const completed = d.completed || 0;
+    const isProcessing = d.processing || false;
+    const last = d.lastVerification || null;
+    const lastStatus = last ? (last.verified ? 'Passed' : 'Failed') : '-';
 
     const pendingBadge = el.querySelector('.health-sub-row:nth-child(2) .badge');
     if (pendingBadge) pendingBadge.textContent = pending;
-    const passedEl = el.querySelector('.health-sub-row:nth-child(3) .text-success');
-    if (passedEl) passedEl.textContent = passCount;
-    const failedEl = el.querySelector('.health-sub-row:nth-child(4) .text-error');
-    if (failedEl) failedEl.textContent = failCount;
+    const completedEl = el.querySelector('.health-sub-row:nth-child(3) .text-success');
+    if (completedEl) completedEl.textContent = completed;
+    const processingEl = el.querySelector('.health-sub-row:nth-child(4) span:last-child');
+    if (processingEl) {
+      processingEl.className = isProcessing ? 'text-info' : 'text-muted';
+      processingEl.textContent = isProcessing ? 'Yes' : 'No';
+    }
+    const lastEl = el.querySelector('.health-sub-row:nth-child(5) span:last-child');
+    if (lastEl) {
+      lastEl.className = last?.verified ? 'text-success' : 'text-muted';
+      lastEl.textContent = lastStatus;
+    }
   }
 
   bindEvents() {
